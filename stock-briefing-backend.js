@@ -10,7 +10,7 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// Simple file-based storage for now (upgrade to DB later)
+// Data file for storage
 const DATA_FILE = path.join(__dirname, 'data.json');
 
 // Load or initialize data
@@ -20,8 +20,8 @@ function loadData() {
   }
   return {
     stocks: [
-      { ticker: 'BRC', name: 'Brinks' },
-      { ticker: 'SKHY', name: 'Skyline' }
+      { ticker: 'RILY', name: 'B. Riley Financial' },
+      { ticker: 'SKHY', name: 'Skyline Champion' }
     ],
     email: 'joshuamost726@gmail.com',
     briefings: []
@@ -34,6 +34,11 @@ function saveData(data) {
 
 let data = loadData();
 
+// API Keys
+const FINNHUB_KEY = process.env.FINNHUB_API_KEY;
+const NEWS_API_KEY = process.env.NEWS_API_KEY;
+const ALPHA_VANTAGE_KEY = process.env.ALPHA_VANTAGE_KEY;
+
 // Email setup
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -43,95 +48,196 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// Get stock data from multiple sources
-async function getStockData(ticker) {
+// Finnhub API calls
+async function getStockQuote(ticker) {
   try {
-    // Alpha Vantage for price data
-    const priceRes = await axios.get(`https://www.alphavantage.co/query`, {
+    const res = await axios.get(`https://finnhub.io/api/v1/quote`, {
       params: {
-        function: 'GLOBAL_QUOTE',
         symbol: ticker,
-        apikey: process.env.ALPHA_VANTAGE_KEY
+        token: FINNHUB_KEY
       }
     });
-
-    const quote = priceRes.data['Global Quote'] || {};
-    
-    // NewsAPI for latest news
-    let news = [];
-    try {
-      const newsRes = await axios.get(`https://newsapi.org/v2/everything`, {
-        params: {
-          q: ticker,
-          sortBy: 'publishedAt',
-          language: 'en',
-          apikey: process.env.NEWS_API_KEY,
-          pageSize: 3
-        }
-      });
-      news = newsRes.data.articles || [];
-    } catch (e) {
-      console.log(`News fetch failed for ${ticker}`);
-    }
-
-    return {
-      ticker,
-      price: quote['05. price'],
-      change: quote['09. change'],
-      changePercent: quote['10. change percent'],
-      volume: quote['06. volume'],
-      timestamp: new Date().toISOString(),
-      news: news.slice(0, 2).map(a => ({
-        title: a.title,
-        source: a.source.name,
-        url: a.url,
-        publishedAt: a.publishedAt
-      }))
-    };
-  } catch (error) {
-    console.error(`Error fetching data for ${ticker}:`, error.message);
-    return {
-      ticker,
-      error: 'Failed to fetch data'
-    };
+    return res.data;
+  } catch (e) {
+    console.error(`Error fetching quote for ${ticker}:`, e.message);
+    return null;
   }
 }
 
-// Generate briefing text
-function generateBriefing(stocksData) {
-  let briefing = '📊 STOCK BRIEFING REPORT\n\n';
-  briefing += `Generated: ${new Date().toLocaleString()}\n\n`;
-
-  stocksData.forEach(stock => {
-    if (stock.error) {
-      briefing += `❌ ${stock.ticker}: ${stock.error}\n\n`;
-      return;
-    }
-
-    briefing += `━━━ ${stock.ticker} ━━━\n`;
-    briefing += `Price: $${stock.price} | Change: ${stock.change} (${stock.changePercent})\n`;
-    briefing += `Volume: ${stock.volume}\n`;
-    
-    if (stock.news.length > 0) {
-      briefing += `\nLatest News:\n`;
-      stock.news.forEach(n => {
-        briefing += `• ${n.title}\n  Source: ${n.source}\n`;
-      });
-    }
-    briefing += '\n';
-  });
-
-  return briefing;
+async function getCompanyProfile(ticker) {
+  try {
+    const res = await axios.get(`https://finnhub.io/api/v1/stock/profile2`, {
+      params: {
+        symbol: ticker,
+        token: FINNHUB_KEY
+      }
+    });
+    return res.data;
+  } catch (e) {
+    console.error(`Error fetching profile for ${ticker}:`, e.message);
+    return null;
+  }
 }
 
-// Send briefing email
+async function getRecommendationTrends(ticker) {
+  try {
+    const res = await axios.get(`https://finnhub.io/api/v1/stock/recommendation`, {
+      params: {
+        symbol: ticker,
+        token: FINNHUB_KEY
+      }
+    });
+    return res.data;
+  } catch (e) {
+    console.error(`Error fetching recommendations for ${ticker}:`, e.message);
+    return null;
+  }
+}
+
+async function getEarningsCalendar(ticker) {
+  try {
+    const res = await axios.get(`https://finnhub.io/api/v1/calendar/earnings`, {
+      params: {
+        symbol: ticker,
+        token: FINNHUB_KEY
+      }
+    });
+    return res.data;
+  } catch (e) {
+    console.error(`Error fetching earnings for ${ticker}:`, e.message);
+    return null;
+  }
+}
+
+async function getNews(ticker) {
+  try {
+    const res = await axios.get(`https://newsapi.org/v2/everything`, {
+      params: {
+        q: ticker,
+        sortBy: 'publishedAt',
+        language: 'en',
+        apikey: NEWS_API_KEY,
+        pageSize: 5
+      }
+    });
+    return res.data.articles || [];
+  } catch (e) {
+    console.error(`Error fetching news for ${ticker}:`, e.message);
+    return [];
+  }
+}
+
+// Generate comprehensive briefing
+async function getStockData(ticker) {
+  try {
+    const quote = await getStockQuote(ticker);
+    const profile = await getCompanyProfile(ticker);
+    const recommendations = await getRecommendationTrends(ticker);
+    const earnings = await getEarningsCalendar(ticker);
+    const news = await getNews(ticker);
+
+    if (!quote) {
+      return { ticker, error: 'Failed to fetch quote' };
+    }
+
+    return {
+      ticker,
+      quote: {
+        price: quote.c,
+        open: quote.o,
+        high: quote.h,
+        low: quote.l,
+        change: quote.d,
+        changePercent: quote.dp,
+        volume: quote.v,
+        timestamp: new Date().toISOString()
+      },
+      profile: {
+        name: profile?.name || 'N/A',
+        industry: profile?.finnhubIndustry || 'N/A',
+        marketCap: profile?.marketCapitalization || 'N/A',
+        pe: profile?.pe || 'N/A',
+        website: profile?.weburl || 'N/A'
+      },
+      recommendations: recommendations?.[0] || null,
+      nextEarnings: earnings?.[0] || null,
+      news: news.slice(0, 3).map(n => ({
+        title: n.title,
+        source: n.source.name,
+        url: n.url,
+        publishedAt: n.publishedAt
+      }))
+    };
+  } catch (error) {
+    console.error(`Error getting data for ${ticker}:`, error.message);
+    return { ticker, error: 'Failed to fetch stock data' };
+  }
+}
+
+// Generate insight from data
+function generateInsight(stockData) {
+  if (stockData.error) {
+    return `❌ ${stockData.ticker}: ${stockData.error}`;
+  }
+
+  const { ticker, quote, profile, recommendations, nextEarnings, news } = stockData;
+  const changeColor = quote.change >= 0 ? '📈' : '📉';
+  
+  let insight = `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  insight += `${changeColor} ${ticker} - ${profile.name}\n`;
+  insight += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  
+  insight += `💰 PRICE DATA\n`;
+  insight += `Current: $${quote.price.toFixed(2)}\n`;
+  insight += `Change: ${quote.change.toFixed(2)} (${quote.changePercent.toFixed(2)}%)\n`;
+  insight += `52W High: ${quote.high.toFixed(2)} | 52W Low: ${quote.low.toFixed(2)}\n`;
+  insight += `Volume: ${(quote.volume / 1000000).toFixed(2)}M\n\n`;
+
+  insight += `📊 FUNDAMENTALS\n`;
+  insight += `PE Ratio: ${profile.pe !== 'N/A' ? profile.pe.toFixed(2) : 'N/A'}\n`;
+  insight += `Market Cap: $${profile.marketCap ? (profile.marketCap / 1000000000).toFixed(2) + 'B' : 'N/A'}\n`;
+  insight += `Industry: ${profile.industry}\n\n`;
+
+  if (recommendations) {
+    const total = recommendations.buy + recommendations.hold + recommendations.sell;
+    insight += `⭐ ANALYST RATINGS\n`;
+    insight += `Buy: ${recommendations.buy} | Hold: ${recommendations.hold} | Sell: ${recommendations.sell}\n`;
+    insight += `Consensus: ${Math.round((recommendations.buy / total) * 100)}% Bullish\n\n`;
+  }
+
+  if (nextEarnings) {
+    insight += `📅 UPCOMING EARNINGS\n`;
+    insight += `Date: ${nextEarnings.date || 'TBD'}\n`;
+    insight += `EPS Estimate: $${nextEarnings.epsEstimate || 'N/A'}\n\n`;
+  }
+
+  if (news.length > 0) {
+    insight += `📰 TOP NEWS\n`;
+    news.slice(0, 2).forEach((article, idx) => {
+      insight += `${idx + 1}. ${article.title}\n   Source: ${article.source}\n\n`;
+    });
+  }
+
+  return insight;
+}
+
+// Main briefing generator
 async function sendBriefing() {
   try {
     const stocksData = await Promise.all(
       data.stocks.map(stock => getStockData(stock.ticker))
     );
 
-    const briefingText = generateBriefing(stocksData);
+    let briefingText = '📈 STOCK BRIEFING REPORT\n';
+    briefingText += `Generated: ${new Date().toLocaleString()}\n`;
+    briefingText += `=====================================\n\n`;
+
+    stocksData.forEach(stock => {
+      briefingText += generateInsight(stock);
+    });
+
+    briefingText += `\n=====================================\n`;
+    briefingText += `Dashboard: https://stock-briefing-frontend1.vercel.app\n`;
 
     // Save to history
     data.briefings.push({
@@ -140,7 +246,7 @@ async function sendBriefing() {
       stocks: stocksData
     });
 
-    // Keep only last 30 briefings
+    // Keep last 30 briefings
     if (data.briefings.length > 30) {
       data.briefings = data.briefings.slice(-30);
     }
@@ -150,9 +256,9 @@ async function sendBriefing() {
     await transporter.sendMail({
       from: process.env.GMAIL_USER,
       to: data.email,
-      subject: `📈 Stock Briefing - ${new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`,
+      subject: `📊 Stock Briefing - ${new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`,
       text: briefingText,
-      html: `<pre>${briefingText}</pre>`
+      html: `<pre style="font-family: monospace; white-space: pre-wrap;">${briefingText}</pre>`
     });
 
     console.log(`✅ Briefing sent at ${new Date().toISOString()}`);
@@ -161,12 +267,12 @@ async function sendBriefing() {
   }
 }
 
-// Schedule briefings
-// 8 AM
+// Schedule briefings (UTC times)
+// 8 AM UTC
 cron.schedule('0 8 * * *', sendBriefing);
-// 1 PM
+// 1 PM UTC
 cron.schedule('0 13 * * *', sendBriefing);
-// 5 PM
+// 5 PM UTC
 cron.schedule('0 17 * * *', sendBriefing);
 
 // API Routes
@@ -174,7 +280,7 @@ app.get('/api/stocks', (req, res) => {
   res.json(data.stocks);
 });
 
-app.post('/api/stocks', (req, res) => {
+app.post('/api/stocks', async (req, res) => {
   const { ticker, name } = req.body;
   if (!ticker) return res.status(400).json({ error: 'Ticker required' });
   
@@ -201,7 +307,18 @@ app.get('/api/briefing/latest', async (req, res) => {
     const stocksData = await Promise.all(
       data.stocks.map(stock => getStockData(stock.ticker))
     );
-    const briefing = generateBriefing(stocksData);
+    
+    let briefing = '📈 STOCK BRIEFING REPORT\n';
+    briefing += `Generated: ${new Date().toLocaleString()}\n`;
+    briefing += `=====================================\n\n`;
+
+    stocksData.forEach(stock => {
+      briefing += generateInsight(stock);
+    });
+
+    briefing += `\n=====================================\n`;
+    briefing += `Dashboard: https://stock-briefing-frontend1.vercel.app\n`;
+
     res.json({ briefing, stocks: stocksData });
   } catch (error) {
     res.status(500).json({ error: error.message });
