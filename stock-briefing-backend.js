@@ -195,7 +195,7 @@ function generateInsight(stockData) {
 
   insight += `📊 FUNDAMENTALS\n`;
   insight += `PE Ratio: ${profile.pe !== 'N/A' ? profile.pe.toFixed(2) : 'N/A'}\n`;
-  insight += `Market Cap: ${profile.marketCap ? '$' + (profile.marketCap / 1000000000).toFixed(2) + 'B' : 'N/A'}\n`;
+  insight += `Market Cap: ${profile.marketCap && profile.marketCap > 0 ? '$' + (profile.marketCap / 1000000000).toFixed(2) + 'B' : 'N/A'}\n`;
   insight += `Industry: ${profile.industry}\n\n`;
 
   if (recommendations) {
