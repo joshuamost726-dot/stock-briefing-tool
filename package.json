@@ -1,0 +1,23 @@
+{
+  "name": "stock-briefing-backend",
+  "version": "1.0.0",
+  "description": "Automated stock briefing service with scheduled notifications",
+  "main": "stock-briefing-backend.js",
+  "scripts": {
+    "start": "node stock-briefing-backend.js",
+    "dev": "nodemon stock-briefing-backend.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "node-cron": "^3.0.2",
+    "nodemailer": "^6.9.3",
+    "axios": "^1.4.0"
+  },
+  "devDependencies": {
+    "nodemailer": "^6.9.3"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
