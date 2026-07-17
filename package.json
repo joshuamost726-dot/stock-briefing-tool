@@ -12,7 +12,8 @@
     "cors": "^2.8.5",
     "node-cron": "^3.0.2",
     "nodemailer": "^6.9.3",
-    "axios": "^1.4.0"
+    "axios": "^1.4.0",
+    "pg": "^8.11.0"
   },
   "devDependencies": {
     "nodemailer": "^6.9.3"
