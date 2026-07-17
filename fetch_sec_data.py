@@ -12,7 +12,21 @@ from edgar import Company, set_identity
 SEC_IDENTITY = "joshuamost726@gmail.com"
 set_identity(SEC_IDENTITY)
 
-TRACKED_TICKERS = ["RILY", "SKHY", "ASTS", "LRCX", "QCOM", "CWBHF"]
+def get_tracked_tickers():
+    """Fetch tickers from database instead of hardcoded list"""
+    try:
+        conn = psycopg2.connect(os.environ['DATABASE_URL'])
+        cur = conn.cursor()
+        cur.execute('SELECT ticker FROM tracked_companies')
+        tickers = [row[0] for row in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return tickers
+    except Exception as e:
+        print(f"Error fetching tickers from DB: {e}. Using fallback.")
+        return ['RILY', 'SKHY', 'ASTS', 'LRCX', 'QCOM', 'CWBHF']
+
+TRACKED_TICKERS = get_tracked_tickers()
 
 SMART_MONEY_WATCHLIST = [
     {"name": "Berkshire Hathaway", "cik": "1067983"},
