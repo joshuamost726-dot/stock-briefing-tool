@@ -5,6 +5,7 @@ const nodemailer = require('nodemailer');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const { getInstitutionalBuyingSignal } = require('./convictionScore.js');
 
 const app = express();
 app.use(express.json());
@@ -232,9 +233,18 @@ async function sendBriefing() {
     briefingText += `Generated: ${new Date().toLocaleString()}\n`;
     briefingText += `=====================================\n\n`;
 
-    stocksData.forEach(stock => {
-      briefingText += generateInsight(stock);
-    });
+    for (const stock of stocksData) {
+  briefingText += generateInsight(stock);
+  
+  try {
+    const signal = await getInstitutionalBuyingSignal(stock.ticker);
+    if (signal) {
+      briefingText += `\n💡 Smart Money Signal: ${signal.explanation}\n`;
+    }
+  } catch (error) {
+    console.error(`Error fetching conviction score for ${stock.ticker}:`, error.message);
+  }
+}
 
     briefingText += `\n=====================================\n`;
     briefingText += `Dashboard: https://stock-briefing-frontend1.vercel.app\n`;
