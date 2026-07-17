@@ -177,3 +177,9 @@ def fetch_institutional_holdings(fund_name, cik, tracked_tickers, conn):
         if rows:
             with conn.cursor() as cur:
                 execute_values(cur, """
+                print("\n" + "="*50)
+print("Fetching executive compensation...")
+print("="*50)
+
+from parse_def14a import fetch_and_store_exec_comp
+fetch_and_store_exec_comp()
