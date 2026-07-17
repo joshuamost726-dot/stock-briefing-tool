@@ -1,3 +1,4 @@
 edgartools
 psycopg2-binary
 requests
+beautifulsoup4
