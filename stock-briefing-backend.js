@@ -10,6 +10,7 @@ const { getInsiderBuyingSignal } = require('./insiderScore.js');
 const { getShortInterestSignal } = require('./shortInterestScore.js');
 const { getOptionsVolumeSignal } = require('./optionsVolumeScore.js');
 const { getPriceTarget } = require('./priceTargetData.js');
+const { getNoiseScore } = require('./noiseScore.js');
 
 // Scores analyst consensus 0-100 from Finnhub recommendation trends.
 function getAnalystSignal(recommendations) {
@@ -439,6 +440,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
     const signalsById = {};
     const scores = [];
     const plainParts = [];
+    const activeStatuses = [];
     // Signal 0: Insider buying (Form 4)
     try {
       const insider = await getInsiderBuyingSignal(ticker);
@@ -447,6 +449,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
         scores.push(insider.confidenceScore);
         plainParts.push(insider.explanation);
       }
+      const insiderActive = insider.hasSignal && insider.confidenceScore > 0;
 
       const d = insider.detail || {};
 
