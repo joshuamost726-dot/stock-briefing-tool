@@ -69,7 +69,10 @@ async function getInstitutionalBuyingSignal(ticker) {
   }
 
   const holderCount = rows.length;
-  const period = rows[0].filing_period;
+  const rawPeriod = rows[0].filing_period;
+  const period = rawPeriod instanceof Date
+    ? rawPeriod.toISOString().slice(0, 10)
+    : String(rawPeriod).slice(0, 10);
 
   // --- Breadth: log-scaled holder count. Context, not conviction. ---
   const breadthScore = Math.min(100, Math.round((Math.log10(holderCount) / 3) * 100));
