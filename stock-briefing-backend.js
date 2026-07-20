@@ -353,7 +353,94 @@ stock.tierLabel = signal?.label ?? 'No Data';
   }
 });
    
+app.get('/api/ticker/:ticker', async (req, res) => {
+  const ticker = String(req.params.ticker || '').toUpperCase();
+  const tracked = data.stocks.find(s => s.ticker === ticker);
 
+  if (!tracked) {
+    return res.status(404).json({ error: 'Ticker not tracked', ticker });
+  }
+
+  const SIGNAL_ORDER = [
+    { id: 'insider_buying',       label: 'Insider Buying' },
+    { id: 'institutional_buying', label: 'Institutional Buying' },
+    { id: 'earnings_whisper',     label: 'Earnings Whisper' },
+    { id: 'short_interest',       label: 'Short Interest' },
+    { id: 'analyst_rating',       label: 'Analyst Rating Change' },
+    { id: 'options_volume',       label: 'Options Call Volume' }
+  ];
+
+  function normalize(meta, raw) {
+    const v = (raw && raw.validation) || {};
+    return {
+      id: meta.id,
+      label: meta.label,
+      status: (raw && raw.status) || 'neutral',
+      headline: (raw && raw.headline) || 'No signal detected',
+      detail: (raw && raw.detail) || '',
+      validation: {
+        timing:        v.timing        || 'No data available',
+        scaleVsSalary: v.scaleVsSalary || 'No data available',
+        trackRecord:   v.trackRecord   || 'No data available',
+        corroboration: v.corroboration || 'No data available'
+      }
+    };
+  }
+
+  try {
+    const signalsById = {};
+    let score = 0;
+    let label = 'No Data';
+
+    // Institutional buying — the one signal with real data
+    try {
+      const signal = await getInstitutionalBuyingSignal(ticker);
+      score = signal?.confidenceScore ?? 0;
+      label = signal?.label ?? 'No Data';
+
+      const d = signal?.detail || {};
+      signalsById.institutional_buying = {
+        status: score >= 50 ? 'positive' : 'neutral',
+        headline: d.distinctFunds
+          ? `${d.distinctFunds} institutional holder(s) on file`
+          : 'No institutional holdings on file',
+        detail: signal?.explanation || '',
+        validation: {
+          timing: `Timing sub-score ${d.timingScore ?? 'n/a'}. 13F filings lag up to 45 days.`,
+          scaleVsSalary: 'Not applicable to institutional filings.',
+          trackRecord: `Track record sub-score ${d.trackRecordScore ?? 'n/a'}.`,
+          corroboration: d.distinctFunds > 1
+            ? `${d.distinctFunds} funds hold a position.`
+            : 'Single holder — no corroboration.'
+        }
+      };
+    } catch (err) {
+      console.error(`Institutional signal failed for ${ticker}:`, err);
+    }
+
+    const tier = score >= 70 ? 'High' : score >= 50 ? 'Moderate' : 'Low';
+    const action = score >= 70 ? 'BUY' : score >= 50 ? 'HOLD' : 'SELL';
+    const verdict = score >= 70 ? 'Trust' : score >= 50 ? 'Watch' : 'Ignore';
+
+    res.json({
+      ticker,
+      companyName: tracked.name || ticker,
+      convictionScore: score,
+      tier,
+      action,
+      plainEnglish: signalsById.institutional_buying?.detail
+        || `No signal data available for ${ticker} yet.`,
+      bottomLine: {
+        verdict,
+        reasoning: `Score of ${score}/100 (${label}). Currently based on institutional holdings only — five other signals are not yet wired up.`
+      },
+      signals: SIGNAL_ORDER.map(m => normalize(m, signalsById[m.id]))
+    });
+  } catch (error) {
+    console.error(`[ticker/${ticker}]`, error);
+    res.status(500).json({ error: 'Failed to build ticker detail' });
+  }
+});
 app.post('/api/settings', (req, res) => {
   data.email = req.body.email || data.email;
   saveData(data);
