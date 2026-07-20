@@ -6,6 +6,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { getInstitutionalBuyingSignal } = require('./convictionScore.js');
+const { getInsiderBuyingSignal } = require('./insiderScore.js');
 
 // Scores analyst consensus 0-100 from Finnhub recommendation trends.
 function getAnalystSignal(recommendations) {
