@@ -9,6 +9,7 @@ const { getInstitutionalBuyingSignal } = require('./convictionScore.js');
 const { getInsiderBuyingSignal } = require('./insiderScore.js');
 const { getShortInterestSignal } = require('./shortInterestScore.js');
 const { getOptionsVolumeSignal } = require('./optionsVolumeScore.js');
+const { getPriceTarget } = require('./priceTargetData.js');
 
 // Scores analyst consensus 0-100 from Finnhub recommendation trends.
 function getAnalystSignal(recommendations) {
@@ -585,12 +586,6 @@ app.get('/api/ticker/:ticker', async (req, res) => {
     }
 
     // Signal 2: Analyst ratings
-
-    // Signal 2: Analyst ratings
-
-    
-
-    // Signal 2: Analyst ratings
     const stockData = await getStockData(ticker);
     const analyst = getAnalystSignal(stockData.recommendations);
     if (analyst) {
@@ -612,6 +607,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       companyName: tracked.name || ticker,
       quote: stockData.quote,
       profile: stockData.profile,
+      priceTarget: await getPriceTarget(ticker),
       convictionScore: score,
       tier,
       action,
