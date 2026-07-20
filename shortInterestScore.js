@@ -48,6 +48,10 @@ async function getShortInterestSignal(ticker) {
 
   const latest = rows[0];
   const prior = rows[1];
+  const rawDate = latest.settlement_date;
+  const settlementDateStr = rawDate instanceof Date
+    ? rawDate.toISOString().slice(0, 10)
+    : String(rawDate).slice(0, 10);
 
   const latestShares = Number(latest.short_interest_shares);
   const priorShares = Number(prior.short_interest_shares);
@@ -101,7 +105,7 @@ async function getShortInterestSignal(ticker) {
 
   const explanation =
     `Short interest ${direction} ${absChange.toFixed(1)}% period-over-period ` +
-    `(${Math.round(priorShares).toLocaleString()} → ${Math.round(latestShares).toLocaleString()} shares as of ${latest.settlement_date}). ` +
+    `(${Math.round(priorShares).toLocaleString()} → ${Math.round(latestShares).toLocaleString()} shares as of ${settlementDateStr}). ` +
     `Days to cover: ${daysToCover.toFixed(1)}. Trend: ${trendNote}. ` +
     (direction === 'increasing'
       ? 'Rising short interest can reflect growing bearish conviction, or set up a squeeze if the stock rallies against crowded shorts.'
@@ -122,7 +126,7 @@ async function getShortInterestSignal(ticker) {
       magnitudeScore,
       coverScore,
       trendScore,
-      settlementDate: latest.settlement_date,
+      settlementDate: settlementDateStr,
     },
   };
 }
