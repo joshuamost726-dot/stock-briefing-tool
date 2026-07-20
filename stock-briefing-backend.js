@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { getInstitutionalBuyingSignal } = require('./convictionScore.js');
 const { getInsiderBuyingSignal } = require('./insiderScore.js');
+const { getShortInterestSignal } = require('./shortInterestScore.js');
 
 // Scores analyst consensus 0-100 from Finnhub recommendation trends.
 function getAnalystSignal(recommendations) {
@@ -501,9 +502,56 @@ app.get('/api/ticker/:ticker', async (req, res) => {
             : 'Single holder — no corroboration.'
         }
       };
-    } catch (err) {
+   } catch (err) {
       console.error(`Institutional signal failed for ${ticker}:`, err);
     }
+
+    // Signal: Short interest
+    try {
+      const shortInt = await getShortInterestSignal(ticker);
+      const d = shortInt.detail || {};
+
+      if (shortInt.hasSignal && shortInt.confidenceScore > 0) {
+        // Convert strength+direction into a bullish-oriented contribution:
+        // falling short interest (shorts covering) leans bullish;
+        // rising short interest leans bearish absent a confirmed squeeze.
+        const bullishContribution = shortInt.direction === 'decreasing'
+          ? shortInt.confidenceScore
+          : shortInt.direction === 'increasing'
+          ? 100 - shortInt.confidenceScore
+          : 50;
+
+        scores.push(bullishContribution);
+        plainParts.push(shortInt.explanation);
+      }
+
+      signalsById.short_interest = {
+        status: !shortInt.hasSignal ? 'neutral'
+              : shortInt.direction === 'decreasing' ? 'positive'
+              : shortInt.direction === 'increasing' ? 'negative'
+              : 'neutral',
+        headline: shortInt.hasSignal
+          ? `Short interest ${shortInt.direction} as of ${d.settlementDate}`
+          : shortInt.label,
+        detail: shortInt.explanation,
+        validation: {
+          timing: d.settlementDate
+            ? `Settlement date ${d.settlementDate}. FINRA short interest is published twice monthly.`
+            : 'No settlement data available.',
+          scaleVsSalary: 'Not applicable to short interest.',
+          trackRecord: 'No data available — requires logging past short interest moves vs. subsequent price outcomes.',
+          corroboration: d.trendScore >= 80
+            ? shortInt.explanation.match(/consistent .*?trend/)?.[0] || 'Consistent multi-period trend.'
+            : 'No confirmed multi-period trend yet.'
+        }
+      };
+    } catch (err) {
+      console.error(`Short interest signal failed for ${ticker}:`, err);
+    }
+
+    // Signal 2: Analyst ratings
+
+    
 
     // Signal 2: Analyst ratings
     const stockData = await getStockData(ticker);
