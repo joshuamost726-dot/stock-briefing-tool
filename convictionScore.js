@@ -1,14 +1,14 @@
 /**
  * convictionScore.js
  *
- * Institutional Buying signal, scored against full 13F sweep data
- * (~6k holdings/quarter rather than a 5-fund watchlist).
+ * Institutional Buying signal, scored against full 13F sweep data.
  *
- * IMPORTANT: holder count tracks market cap far more than conviction.
- * The real conviction signal is quarter-over-quarter position change,
- * which requires two sweeps to exist. Until then this function reports
- * momentumAvailable: false and the score should be read as
- * "ownership profile," not "smart money is buying."
+ * DESIGN NOTE: a single quarter of 13F data shows who OWNS a stock,
+ * not who is BUYING it. Ownership is not conviction. Until two sweeps
+ * exist and pct_change is populated, this function caps its score at
+ * MAX_SCORE_WITHOUT_MOMENTUM and never returns a high-conviction label.
+ * That is deliberate: the tool should say "I cannot tell yet" rather
+ * than dress up an ownership snapshot as a buy signal.
  */
 
 const { Pool } = require('pg');
@@ -27,7 +27,17 @@ const TOP_TIER_FUNDS = [
   'PERSHING SQUARE',
 ];
 
-function labelFor(score) {
+// Below this many holders, concentration is a liquidity artifact,
+// not evidence of deliberate positioning.
+const MIN_HOLDERS_FOR_CONCENTRATION = 20;
+
+// Ceiling applied when quarter-over-quarter change is unavailable.
+const MAX_SCORE_WITHOUT_MOMENTUM = 60;
+
+function labelFor(score, momentumAvailable) {
+  if (!momentumAvailable) {
+    return { multiplier: 0.8, label: 'Ownership Only — Conviction Unmeasured' };
+  }
   if (score >= 80) return { multiplier: 1.3, label: 'High Conviction' };
   if (score >= 50) return { multiplier: 1.0, label: 'Moderate Conviction' };
   if (score >= 20) return { multiplier: 0.7, label: 'Low Conviction / Possible Noise' };
@@ -62,33 +72,32 @@ async function getInstitutionalBuyingSignal(ticker) {
   const period = rows[0].filing_period;
 
   // --- Breadth: log-scaled holder count. Context, not conviction. ---
-  // 1 holder -> ~0, 10 -> ~33, 100 -> ~66, 1000+ -> ~100
   const breadthScore = Math.min(100, Math.round((Math.log10(holderCount) / 3) * 100));
 
-  // --- Concentration: share of total value held by the top 10 ---
+  // --- Concentration: only meaningful above a minimum holder count ---
   const values = rows.map(r => Number(r.value_usd) || 0);
   const totalValue = values.reduce((a, b) => a + b, 0);
   const top10Value = values.slice(0, 10).reduce((a, b) => a + b, 0);
   const top10Pct = totalValue > 0 ? (top10Value / totalValue) * 100 : null;
 
-  // Concentrated ownership implies deliberate positions rather than
-  // passive index exposure. Diffuse ownership scores lower.
   let concentrationScore = 50;
-  if (top10Pct !== null) {
+  let concentrationMeaningful = holderCount >= MIN_HOLDERS_FOR_CONCENTRATION;
+
+  if (concentrationMeaningful && top10Pct !== null) {
     if (top10Pct > 70) concentrationScore = 90;
     else if (top10Pct > 50) concentrationScore = 75;
     else if (top10Pct > 30) concentrationScore = 55;
     else concentrationScore = 35;
   }
 
-  // --- Top-tier presence: weak evidence at this scale, kept for context ---
+  // --- Top-tier presence: weak evidence at scale, kept for context ---
   const topTierHolders = rows
     .map(r => (r.fund_name || '').toUpperCase())
     .filter(name => TOP_TIER_FUNDS.some(f => name.includes(f)));
   const hasTopTier = topTierHolders.length > 0;
   const trackRecordScore = hasTopTier ? 80 : 50;
 
-  // --- Momentum: the actual conviction signal. Null until 2+ sweeps exist. ---
+  // --- Momentum: the actual conviction signal ---
   const changes = rows
     .filter(r => r.pct_change !== null)
     .map(r => Number(r.pct_change));
@@ -110,7 +119,7 @@ async function getInstitutionalBuyingSignal(ticker) {
     else momentumScore = 15;
   }
 
-  // --- Weighted score. Momentum dominates when present. ---
+  // --- Weighted score ---
   let confidenceScore;
   if (momentumAvailable) {
     confidenceScore = Math.round(
@@ -120,20 +129,23 @@ async function getInstitutionalBuyingSignal(ticker) {
       trackRecordScore * 0.10
     );
   } else {
-    confidenceScore = Math.round(
-      concentrationScore * 0.50 +
-      breadthScore * 0.30 +
+    const raw = Math.round(
+      concentrationScore * 0.40 +
+      breadthScore * 0.40 +
       trackRecordScore * 0.20
     );
+    confidenceScore = Math.min(raw, MAX_SCORE_WITHOUT_MOMENTUM);
   }
 
-  const { multiplier, label } = labelFor(confidenceScore);
+  const { multiplier, label } = labelFor(confidenceScore, momentumAvailable);
 
   // --- Plain English ---
   let explanation = `${holderCount.toLocaleString()} institutional holder(s) as of ${period}.`;
 
-  if (top10Pct !== null) {
+  if (top10Pct !== null && concentrationMeaningful) {
     explanation += ` Top 10 hold ${top10Pct.toFixed(0)}% of reported value.`;
+  } else if (!concentrationMeaningful) {
+    explanation += ` Too few holders to read concentration meaningfully.`;
   }
 
   if (hasTopTier) {
@@ -144,7 +156,7 @@ async function getInstitutionalBuyingSignal(ticker) {
   if (momentumAvailable) {
     explanation += ` ${increasing} increased, ${decreasing} decreased vs prior quarter.`;
   } else {
-    explanation += ` Quarter-over-quarter change not yet available — needs a second sweep.`;
+    explanation += ` This is an ownership snapshot, not a buying signal — quarter-over-quarter change requires a second sweep.`;
   }
 
   return {
@@ -160,6 +172,7 @@ async function getInstitutionalBuyingSignal(ticker) {
       totalValue,
       breadthScore,
       concentrationScore,
+      concentrationMeaningful,
       trackRecordScore,
       momentumScore,
       increasing,
