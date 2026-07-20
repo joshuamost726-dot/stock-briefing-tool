@@ -477,6 +477,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
             : `${d.sellCount ?? 0} routine sell(s) on file — not counted as corroboration.`
         }
       };
+      if (insiderActive) activeStatuses.push(signalsById.insider_buying.status);
     } catch (err) {
       console.error(`Insider signal failed for ${ticker}:`, err);
     }
@@ -507,6 +508,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
             : 'Single holder — no corroboration.'
         }
       };
+      if (instScore > 0) activeStatuses.push(signalsById.institutional_buying.status);
    } catch (err) {
       console.error(`Institutional signal failed for ${ticker}:`, err);
     }
@@ -550,6 +552,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
             : 'No confirmed multi-period trend yet.'
         }
       };
+      if (shortInt.hasSignal && shortInt.confidenceScore > 0) activeStatuses.push(signalsById.short_interest.status);
     } catch (err) {
       console.error(`Short interest signal failed for ${ticker}:`, err);
     }
@@ -584,6 +587,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
             : 'No corroborating signal within options data alone.'
         }
       };
+      if (optVol.hasSignal && optVol.confidenceScore > 0) activeStatuses.push(signalsById.options_volume.status);
     } catch (err) {
       console.error(`Options volume signal failed for ${ticker}:`, err);
     }
@@ -591,12 +595,12 @@ app.get('/api/ticker/:ticker', async (req, res) => {
     // Signal 2: Analyst ratings
     const stockData = await getStockData(ticker);
     const analyst = getAnalystSignal(stockData.recommendations);
-    if (analyst) {
+   if (analyst) {
       scores.push(analyst.score);
       signalsById.analyst_rating = analyst;
       plainParts.push(`Analyst consensus: ${analyst.headline}.`);
+      activeStatuses.push(analyst.status);
     }
-
     const score = scores.length
       ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
       : 0;
@@ -615,6 +619,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       tier,
       action,
       activeSignals: scores.length,
+      signalQuality: getNoiseScore(activeStatuses),
       plainEnglish: plainParts.length
         ? plainParts.join(' ')
         : `No signal data available for ${ticker} yet.`,
