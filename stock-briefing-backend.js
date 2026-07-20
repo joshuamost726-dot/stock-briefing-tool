@@ -449,8 +449,8 @@ app.get('/api/ticker/:ticker', async (req, res) => {
 
       signalsById.institutional_buying = {
         status: instScore >= 70 ? 'positive' : instScore >= 50 ? 'neutral' : 'negative',
-        headline: d.distinctFunds
-          ? `${d.distinctFunds} institutional holder(s) on file`
+        headline: d.holderCount
+          ? `${d.holderCount.toLocaleString()} institutional holder(s) on file`
           : 'No institutional holdings on file',
         detail: signal?.explanation || '',
         validation: {
