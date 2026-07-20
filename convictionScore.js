@@ -1,24 +1,33 @@
 /**
  * convictionScore.js
  *
- * Validation layer scoring for the Institutional Buying signal.
- * Reads from institutional_holdings (populated weekly by fetch_sec_data.py)
- * and returns a Confidence Score (0-100), a multiplier, and a plain-English
- * explanation — the "genuine conviction or strategic noise?" answer.
+ * Institutional Buying signal, scored against full 13F sweep data
+ * (~6k holdings/quarter rather than a 5-fund watchlist).
  *
- * Usage:
- *   const { getInstitutionalBuyingSignal } = require('./convictionScore');
- *   const signal = await getInstitutionalBuyingSignal('LRCX');
+ * IMPORTANT: holder count tracks market cap far more than conviction.
+ * The real conviction signal is quarter-over-quarter position change,
+ * which requires two sweeps to exist. Until then this function reports
+ * momentumAvailable: false and the score should be read as
+ * "ownership profile," not "smart money is buying."
  */
 
 const { Pool } = require('pg');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-// Funds considered highest-quality / most-watched "smart money" for the
-// Track Record check. Expand this list over time as you build history.
-const TOP_TIER_FUNDS = ['Berkshire Hathaway', 'Renaissance Technologies'];
+const TOP_TIER_FUNDS = [
+  'BERKSHIRE HATHAWAY',
+  'RENAISSANCE TECHNOLOGIES',
+  'BAUPOST',
+  'THIRD POINT',
+  'TIGER GLOBAL',
+  'LONE PINE',
+  'VIKING GLOBAL',
+  'COATUE',
+  'APPALOOSA',
+  'PERSHING SQUARE',
+];
 
-function confidenceToMultiplier(score) {
+function labelFor(score) {
   if (score >= 80) return { multiplier: 1.3, label: 'High Conviction' };
   if (score >= 50) return { multiplier: 1.0, label: 'Moderate Conviction' };
   if (score >= 20) return { multiplier: 0.7, label: 'Low Conviction / Possible Noise' };
@@ -28,85 +37,135 @@ function confidenceToMultiplier(score) {
 async function getInstitutionalBuyingSignal(ticker) {
   const { rows } = await pool.query(
     `SELECT fund_name, shares_held, value_usd, pct_change, filing_period
-     FROM institutional_holdings
-     WHERE ticker = $1
-     ORDER BY filing_period DESC`,
+       FROM institutional_holdings
+      WHERE ticker = $1
+        AND filing_period = (
+          SELECT MAX(filing_period) FROM institutional_holdings WHERE ticker = $1
+        )
+      ORDER BY value_usd DESC NULLS LAST`,
     [ticker]
   );
 
   if (rows.length === 0) {
     return {
       ticker,
-      rawPoints: 0,
       confidenceScore: 0,
       multiplier: 0,
       label: 'No Data',
-      adjustedPoints: 0,
-      explanation: `No institutional holdings data found for ${ticker} yet.`,
+      momentumAvailable: false,
+      explanation: `No institutional holdings on file for ${ticker}.`,
+      detail: { holderCount: 0 },
     };
   }
 
-  // --- Timing sub-score ---
-  // Flat baseline for now — all current data comes from the same quarter.
-  // Revisit once multiple quarters of history build up.
-  const timingScore = 70;
+  const holderCount = rows.length;
+  const period = rows[0].filing_period;
 
-  // --- Scale sub-score ---
-  // Based on the largest % change seen among funds with known pct_change.
-  const changes = rows.filter(r => r.pct_change !== null).map(r => Number(r.pct_change));
-  const maxIncrease = changes.length ? Math.max(...changes) : null;
-  let scaleScore = 40; // default: new/unknown-history position
-  if (maxIncrease !== null) {
-    if (maxIncrease > 50) scaleScore = 100;
-    else if (maxIncrease > 15) scaleScore = 75;
-    else if (maxIncrease > 0) scaleScore = 55;
-    else if (maxIncrease < -30) scaleScore = 20; // big cuts are a bearish signal, not bullish
-    else scaleScore = 40;
+  // --- Breadth: log-scaled holder count. Context, not conviction. ---
+  // 1 holder -> ~0, 10 -> ~33, 100 -> ~66, 1000+ -> ~100
+  const breadthScore = Math.min(100, Math.round((Math.log10(holderCount) / 3) * 100));
+
+  // --- Concentration: share of total value held by the top 10 ---
+  const values = rows.map(r => Number(r.value_usd) || 0);
+  const totalValue = values.reduce((a, b) => a + b, 0);
+  const top10Value = values.slice(0, 10).reduce((a, b) => a + b, 0);
+  const top10Pct = totalValue > 0 ? (top10Value / totalValue) * 100 : null;
+
+  // Concentrated ownership implies deliberate positions rather than
+  // passive index exposure. Diffuse ownership scores lower.
+  let concentrationScore = 50;
+  if (top10Pct !== null) {
+    if (top10Pct > 70) concentrationScore = 90;
+    else if (top10Pct > 50) concentrationScore = 75;
+    else if (top10Pct > 30) concentrationScore = 55;
+    else concentrationScore = 35;
   }
 
-  // --- Track record sub-score ---
-  const hasTopTierFund = rows.some(r => TOP_TIER_FUNDS.includes(r.fund_name));
-  const trackRecordScore = hasTopTierFund ? 90 : 55;
+  // --- Top-tier presence: weak evidence at this scale, kept for context ---
+  const topTierHolders = rows
+    .map(r => (r.fund_name || '').toUpperCase())
+    .filter(name => TOP_TIER_FUNDS.some(f => name.includes(f)));
+  const hasTopTier = topTierHolders.length > 0;
+  const trackRecordScore = hasTopTier ? 80 : 50;
 
-  // --- Corroboration sub-score ---
-  const distinctFunds = new Set(rows.map(r => r.fund_name)).size;
-  let corroborationScore = 30;
-  if (distinctFunds >= 4) corroborationScore = 100;
-  else if (distinctFunds >= 2) corroborationScore = 65;
+  // --- Momentum: the actual conviction signal. Null until 2+ sweeps exist. ---
+  const changes = rows
+    .filter(r => r.pct_change !== null)
+    .map(r => Number(r.pct_change));
 
-  // --- Weighted Confidence Score ---
-  const confidenceScore = Math.round(
-    timingScore * 0.25 +
-    scaleScore * 0.30 +
-    trackRecordScore * 0.25 +
-    corroborationScore * 0.20
-  );
+  const momentumAvailable = changes.length > 0;
+  let momentumScore = null;
+  let increasing = 0;
+  let decreasing = 0;
 
-  const { multiplier, label } = confidenceToMultiplier(confidenceScore);
+  if (momentumAvailable) {
+    increasing = changes.filter(c => c > 0).length;
+    decreasing = changes.filter(c => c < 0).length;
+    const netPct = (increasing / changes.length) * 100;
 
-  // --- Raw signal points (institutional buying: max +20 per original design) ---
-  const rawPoints = distinctFunds >= 2 ? 20 : 12;
-  const adjustedPoints = Math.round(rawPoints * multiplier);
-
-  // --- Plain English explanation ---
-  const fundList = [...new Set(rows.map(r => r.fund_name))].join(', ');
-  let explanation = `${distinctFunds} fund(s) hold ${ticker}: ${fundList}.`;
-  if (maxIncrease !== null) {
-    explanation += ` Largest quarter-over-quarter change: ${maxIncrease.toFixed(1)}%.`;
+    if (netPct > 65) momentumScore = 95;
+    else if (netPct > 55) momentumScore = 75;
+    else if (netPct > 45) momentumScore = 50;
+    else if (netPct > 35) momentumScore = 30;
+    else momentumScore = 15;
   }
-  if (hasTopTierFund) {
-    explanation += ` Includes a top-tier fund, boosting track record confidence.`;
+
+  // --- Weighted score. Momentum dominates when present. ---
+  let confidenceScore;
+  if (momentumAvailable) {
+    confidenceScore = Math.round(
+      momentumScore * 0.50 +
+      concentrationScore * 0.25 +
+      breadthScore * 0.15 +
+      trackRecordScore * 0.10
+    );
+  } else {
+    confidenceScore = Math.round(
+      concentrationScore * 0.50 +
+      breadthScore * 0.30 +
+      trackRecordScore * 0.20
+    );
+  }
+
+  const { multiplier, label } = labelFor(confidenceScore);
+
+  // --- Plain English ---
+  let explanation = `${holderCount.toLocaleString()} institutional holder(s) as of ${period}.`;
+
+  if (top10Pct !== null) {
+    explanation += ` Top 10 hold ${top10Pct.toFixed(0)}% of reported value.`;
+  }
+
+  if (hasTopTier) {
+    const names = [...new Set(topTierHolders)].slice(0, 2).join(', ');
+    explanation += ` Includes ${names}.`;
+  }
+
+  if (momentumAvailable) {
+    explanation += ` ${increasing} increased, ${decreasing} decreased vs prior quarter.`;
+  } else {
+    explanation += ` Quarter-over-quarter change not yet available — needs a second sweep.`;
   }
 
   return {
     ticker,
-    rawPoints,
     confidenceScore,
     multiplier,
     label,
-    adjustedPoints,
+    momentumAvailable,
     explanation,
-    detail: { timingScore, scaleScore, trackRecordScore, corroborationScore, distinctFunds, maxIncrease },
+    detail: {
+      holderCount,
+      top10Pct,
+      totalValue,
+      breadthScore,
+      concentrationScore,
+      trackRecordScore,
+      momentumScore,
+      increasing,
+      decreasing,
+      period,
+    },
   };
 }
 
