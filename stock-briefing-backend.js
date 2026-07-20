@@ -8,6 +8,7 @@ const path = require('path');
 const { getInstitutionalBuyingSignal } = require('./convictionScore.js');
 const { getInsiderBuyingSignal } = require('./insiderScore.js');
 const { getShortInterestSignal } = require('./shortInterestScore.js');
+const { getOptionsVolumeSignal } = require('./optionsVolumeScore.js');
 
 // Scores analyst consensus 0-100 from Finnhub recommendation trends.
 function getAnalystSignal(recommendations) {
@@ -548,6 +549,42 @@ app.get('/api/ticker/:ticker', async (req, res) => {
     } catch (err) {
       console.error(`Short interest signal failed for ${ticker}:`, err);
     }
+
+    // Signal: Options call volume
+    try {
+      const optVol = await getOptionsVolumeSignal(ticker);
+      const d = optVol.detail || {};
+
+      if (optVol.hasSignal && optVol.confidenceScore > 0) {
+        scores.push(optVol.confidenceScore);
+        plainParts.push(optVol.explanation);
+      }
+
+      signalsById.options_volume = {
+        status: !optVol.hasSignal ? 'neutral'
+              : optVol.confidenceScore >= 70 ? 'positive'
+              : optVol.confidenceScore >= 50 ? 'neutral'
+              : 'negative',
+        headline: optVol.hasSignal
+          ? `${d.volumeRatio?.toFixed(1)}x average call volume, ${d.callPutRatio?.toFixed(1)}:1 call/put ratio`
+          : optVol.label,
+        detail: optVol.explanation,
+        validation: {
+          timing: optVol.hasSignal
+            ? `Snapshot taken after market close. ${d.daysOfHistory} day(s) of baseline history.`
+            : `${d.daysAvailable ?? 0}/${d.daysNeeded ?? 5} days of history collected so far.`,
+          scaleVsSalary: 'Not applicable to options volume.',
+          trackRecord: 'No data available — requires logging past volume spikes vs. subsequent price moves.',
+          corroboration: optVol.hasSignal && d.volumeScore >= 70 && d.skewScore >= 70
+            ? 'Both volume and call/put skew are elevated together — mutually reinforcing.'
+            : 'No corroborating signal within options data alone.'
+        }
+      };
+    } catch (err) {
+      console.error(`Options volume signal failed for ${ticker}:`, err);
+    }
+
+    // Signal 2: Analyst ratings
 
     // Signal 2: Analyst ratings
 
