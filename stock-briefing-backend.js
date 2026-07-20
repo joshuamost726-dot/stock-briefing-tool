@@ -433,18 +433,22 @@ app.get('/api/ticker/:ticker', async (req, res) => {
 
   try {
     const signalsById = {};
-    let score = 0;
-    let label = 'No Data';
+    const scores = [];
+    const plainParts = [];
 
-    // Institutional buying — the one signal with real data
+    // Signal 1: Institutional buying
     try {
       const signal = await getInstitutionalBuyingSignal(ticker);
-      score = signal?.confidenceScore ?? 0;
-      label = signal?.label ?? 'No Data';
-
+      const instScore = signal?.confidenceScore ?? 0;
       const d = signal?.detail || {};
+
+      if (instScore > 0) {
+        scores.push(instScore);
+        plainParts.push(signal.explanation);
+      }
+
       signalsById.institutional_buying = {
-        status: score >= 50 ? 'positive' : 'neutral',
+        status: instScore >= 70 ? 'positive' : instScore >= 50 ? 'neutral' : 'negative',
         headline: d.distinctFunds
           ? `${d.distinctFunds} institutional holder(s) on file`
           : 'No institutional holdings on file',
@@ -462,6 +466,19 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       console.error(`Institutional signal failed for ${ticker}:`, err);
     }
 
+    // Signal 2: Analyst ratings
+    const stockData = await getStockData(ticker);
+    const analyst = getAnalystSignal(stockData.recommendations);
+    if (analyst) {
+      scores.push(analyst.score);
+      signalsById.analyst_rating = analyst;
+      plainParts.push(`Analyst consensus: ${analyst.headline}.`);
+    }
+
+    const score = scores.length
+      ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
+      : 0;
+
     const tier = score >= 70 ? 'High' : score >= 50 ? 'Moderate' : 'Low';
     const action = score >= 70 ? 'BUY' : score >= 50 ? 'HOLD' : 'SELL';
     const verdict = score >= 70 ? 'Trust' : score >= 50 ? 'Watch' : 'Ignore';
@@ -472,11 +489,13 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       convictionScore: score,
       tier,
       action,
-      plainEnglish: signalsById.institutional_buying?.detail
-        || `No signal data available for ${ticker} yet.`,
+      activeSignals: scores.length,
+      plainEnglish: plainParts.length
+        ? plainParts.join(' ')
+        : `No signal data available for ${ticker} yet.`,
       bottomLine: {
         verdict,
-        reasoning: `Score of ${score}/100 (${label}). Currently based on institutional holdings only — five other signals are not yet wired up.`
+        reasoning: `Score of ${score}/100 based on ${scores.length} of 6 signals. The remaining ${6 - scores.length} have no data source yet.`
       },
       signals: SIGNAL_ORDER.map(m => normalize(m, signalsById[m.id]))
     });
@@ -485,6 +504,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
     res.status(500).json({ error: 'Failed to build ticker detail' });
   }
 });
+
 app.post('/api/settings', (req, res) => {
   data.email = req.body.email || data.email;
   saveData(data);
