@@ -1,8 +1,5 @@
 """
 sweep_13f.py — full 13F-HR sweep for a quarter.
-
-Scans every 13F-HR filed in a quarter and records any holding
-matching a tracked ticker or CUSIP. Roughly 20-25 minutes.
 """
 
 import os
@@ -19,7 +16,6 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 YEAR = 2026
 QUARTER = 2
 
-# CUSIP fallback for when the Ticker column is missing or blank.
 CUSIP_TO_TICKER = {
     "00217D100": "ASTS",
     "512807306": "LRCX",
@@ -68,10 +64,6 @@ def get_col(row, *names):
 
 
 def load_prior_shares(conn, period):
-    """
-    Map of (fund_cik, ticker) -> shares_held from the most recent
-    earlier filing period, so we can compute quarter-over-quarter change.
-    """
     prior = {}
     try:
         with conn.cursor() as cur:
@@ -178,7 +170,7 @@ def main():
     prior = load_prior_shares(conn, period)
     print(f"Prior-quarter rows available: {len(prior)}")
 
-   agg = {}
+    agg = {}
     for fund_cik, fund_name, ticker, shares, value in rows:
         key = (fund_cik, ticker)
         if key not in agg:
@@ -186,7 +178,7 @@ def main():
         agg[key]["shares"] += shares or 0
         agg[key]["value"] += value or 0
 
-    print(f"Aggregated {len(rows)} lines into {len(agg)} fund-ticker positions")
+    print(f"Aggregated {len(rows)} lines into {len(agg)} positions")
 
     final = []
     for (fund_cik, ticker), d in agg.items():
