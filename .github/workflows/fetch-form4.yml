@@ -1,0 +1,26 @@
+name: Fetch Form 4 Insider Transactions
+
+on:
+  schedule:
+    - cron: '0 12 * * *'   # daily at 12:00 UTC (8am ET)
+  workflow_dispatch:        # allows manual trigger from the Actions tab too
+
+jobs:
+  fetch-form4:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Form 4 fetch (last 7 days)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python fetch_form4.py --backfill 7
