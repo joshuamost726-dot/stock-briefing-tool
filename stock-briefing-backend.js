@@ -10,7 +10,7 @@ const { getInsiderBuyingSignal } = require('./insiderScore.js');
 const { getShortInterestSignal } = require('./shortInterestScore.js');
 const { getOptionsVolumeSignal } = require('./optionsVolumeScore.js');
 const { getPriceTarget } = require('./priceTargetData.js');
-const { getNoiseScore } = require('./noiseScore.js');
+const { getVerdict } = require('./noiseScore.js');
 
 // Scores analyst consensus 0-100 from Finnhub recommendation trends.
 function getAnalystSignal(recommendations) {
@@ -607,25 +607,33 @@ app.get('/api/ticker/:ticker', async (req, res) => {
 
     const tier = score >= 70 ? 'High' : score >= 50 ? 'Moderate' : 'Low';
     const action = score >= 70 ? 'BUY' : score >= 50 ? 'HOLD' : 'SELL';
-    const verdict = score >= 70 ? 'Trust' : score >= 50 ? 'Watch' : 'Ignore';
+
+    const priceTarget = await getPriceTarget(ticker);
+    const { badge, headline, reasoning, priceTargetSentence } = getVerdict({
+      activeCount: scores.length,
+      statuses: activeStatuses,
+      priceTarget,
+    });
+
+    const signalsSummary = plainParts.length
+      ? plainParts.join(' ')
+      : `No signal data available for ${ticker} yet.`;
 
     res.json({
       ticker,
       companyName: tracked.name || ticker,
       quote: stockData.quote,
       profile: stockData.profile,
-      priceTarget: await getPriceTarget(ticker),
+      priceTarget,
       convictionScore: score,
       tier,
       action,
       activeSignals: scores.length,
-      signalQuality: getNoiseScore(activeStatuses),
-      plainEnglish: plainParts.length
-        ? plainParts.join(' ')
-        : `No signal data available for ${ticker} yet.`,
+      signalQuality: { badge, headline },
+      plainEnglish: signalsSummary,
       bottomLine: {
-        verdict,
-        reasoning: `Score of ${score}/100 based on ${scores.length} of 6 signals. The remaining ${6 - scores.length} have no data source yet.`
+        verdict: headline,
+        reasoning: `${signalsSummary}${priceTargetSentence} ${reasoning}`
       },
       signals: SIGNAL_ORDER.map(m => normalize(m, signalsById[m.id]))
     });
