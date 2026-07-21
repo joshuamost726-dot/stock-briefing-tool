@@ -27,6 +27,12 @@ async function getInsiderBuyingSignal(ticker) {
     [ticker]
   );
 
+  const { rows: freshnessRows } = await pool.query(
+    `SELECT MAX(fetched_at) AS last_checked FROM insider_transactions WHERE ticker = $1`,
+    [ticker]
+  );
+  const lastChecked = freshnessRows[0]?.last_checked || null;
+
   if (transactions.length === 0) {
     return {
       ticker,
@@ -34,7 +40,7 @@ async function getInsiderBuyingSignal(ticker) {
       hasSignal: false,
       label: 'No Data',
       explanation: `No Form 4 filings on file for ${ticker}.`,
-      detail: { buyCount: 0, sellCount: 0 },
+      detail: { buyCount: 0, sellCount: 0, lastChecked },
     };
   }
 
@@ -52,7 +58,7 @@ async function getInsiderBuyingSignal(ticker) {
         `is not scored — insiders sell for many routine reasons (10b5-1 plans, ` +
         `tax withholding, diversification) that carry no directional signal. ` +
         `This signal activates only when a genuine open-market buy appears.`,
-      detail: { buyCount: 0, sellCount: sells.length },
+      detail: { buyCount: 0, sellCount: sells.length, lastChecked },
     };
   }
 
@@ -81,10 +87,6 @@ async function getInsiderBuyingSignal(ticker) {
 
   const distinctBuyers = new Set(buys.map(b => b.insider_name)).size;
   const totalBuyValue = buys.reduce((sum, b) => sum + (Number(b.value_usd) || 0), 0);
-  const latestFiledAt = buys
-    .map(b => b.filed_at)
-    .filter(Boolean)
-    .sort((a, b) => new Date(b) - new Date(a))[0] || null;
 
   let label;
   if (confidenceScore >= 80) label = 'High Conviction';
@@ -119,7 +121,7 @@ async function getInsiderBuyingSignal(ticker) {
       avgScale,
       timingScore,
       corroborationScore,
-      latestFiledAt,
+      lastChecked,
     },
   };
 }

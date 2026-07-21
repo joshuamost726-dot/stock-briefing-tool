@@ -10,6 +10,7 @@ const { getInsiderBuyingSignal } = require('./insiderScore.js');
 const { getShortInterestSignal } = require('./shortInterestScore.js');
 const { getOptionsVolumeSignal } = require('./optionsVolumeScore.js');
 const { getPriceTarget } = require('./priceTargetData.js');
+const { getVerdict } = require('./noiseScore.js');
 
 // Scores analyst consensus 0-100 from Finnhub recommendation trends.
 function getAnalystSignal(recommendations) {
@@ -41,9 +42,13 @@ function getAnalystSignal(recommendations) {
       timing: `Consensus as of ${recommendations.period || 'latest period'}. Ratings lag price moves.`,
       scaleVsSalary: 'Not applicable to analyst ratings.',
       trackRecord: 'No data available — requires logging past rating changes vs outcomes.',
-      corroboration: total >= 10
+     corroboration: total >= 10
         ? `${total} analysts covering — broad coverage.`
         : `Only ${total} analyst(s) covering — thin coverage.`
+    },
+    freshness: {
+      lastChecked: null,
+      schedule: 'Fetched live every time this page loads'
     }
   };
 }
@@ -410,12 +415,12 @@ app.get('/api/ticker/:ticker', async (req, res) => {
   }
 
   const SIGNAL_ORDER = [
-    { id: 'insider_buying',       label: 'Insider Buying',        schedule: 'Runs daily at 8am ET' },
-    { id: 'institutional_buying', label: 'Institutional Buying',  schedule: '13F filings — updated weekly, plus periodic full sweeps' },
-    { id: 'earnings_whisper',     label: 'Earnings Whisper',      schedule: 'Not yet wired to a data source' },
-    { id: 'short_interest',       label: 'Short Interest',        schedule: 'FINRA settlement data — twice monthly (5th & 20th)' },
-    { id: 'analyst_rating',       label: 'Analyst Rating Change', schedule: 'Live — fetched fresh on every request' },
-    { id: 'options_volume',       label: 'Options Call Volume',   schedule: 'Weekdays after market close' }
+    { id: 'insider_buying',       label: 'Insider Buying' },
+    { id: 'institutional_buying', label: 'Institutional Buying' },
+    { id: 'earnings_whisper',     label: 'Earnings Whisper' },
+    { id: 'short_interest',       label: 'Short Interest' },
+    { id: 'analyst_rating',       label: 'Analyst Rating Change' },
+    { id: 'options_volume',       label: 'Options Call Volume' }
   ];
 
   function normalize(meta, raw) {
@@ -427,15 +432,15 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       status: (raw && raw.status) || 'neutral',
       headline: (raw && raw.headline) || 'No signal detected',
       detail: (raw && raw.detail) || '',
-      freshness: {
-        lastChecked: f.lastChecked || null,
-        schedule: meta.schedule
-      },
       validation: {
         timing:        v.timing        || 'No data available',
         scaleVsSalary: v.scaleVsSalary || 'No data available',
         trackRecord:   v.trackRecord   || 'No data available',
         corroboration: v.corroboration || 'No data available'
+      },
+      freshness: {
+        lastChecked: f.lastChecked || null,
+        schedule: f.schedule || 'No schedule data available'
       }
     };
   }
@@ -444,6 +449,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
     const signalsById = {};
     const scores = [];
     const plainParts = [];
+    const activeStatuses = [];
     // Signal 0: Insider buying (Form 4)
     try {
       const insider = await getInsiderBuyingSignal(ticker);
@@ -452,6 +458,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
         scores.push(insider.confidenceScore);
         plainParts.push(insider.explanation);
       }
+      const insiderActive = insider.hasSignal && insider.confidenceScore > 0;
 
       const d = insider.detail || {};
 
@@ -464,7 +471,6 @@ app.get('/api/ticker/:ticker', async (req, res) => {
           ? `${d.buyCount} insider buy(s) from ${d.distinctBuyers} insider(s)`
           : insider.label,
         detail: insider.explanation,
-        freshness: { lastChecked: d.latestFiledAt || null },
         validation: {
           timing: d.timingScore != null
             ? `Timing sub-score ${d.timingScore}. Form 4s are filed within 2 business days of the transaction.`
@@ -478,8 +484,13 @@ app.get('/api/ticker/:ticker', async (req, res) => {
             : d.distinctBuyers === 1
             ? 'Only one insider bought — no corroboration from others yet.'
             : `${d.sellCount ?? 0} routine sell(s) on file — not counted as corroboration.`
+        },
+        freshness: {
+          lastChecked: d.lastChecked,
+          schedule: 'Updates automatically, daily'
         }
       };
+      if (insiderActive) activeStatuses.push(signalsById.insider_buying.status);
     } catch (err) {
       console.error(`Insider signal failed for ${ticker}:`, err);
     }
@@ -508,6 +519,10 @@ app.get('/api/ticker/:ticker', async (req, res) => {
           corroboration: d.holderCount > 1
             ? `${d.holderCount} funds hold a position.`
             : 'Single holder — no corroboration.'
+        },
+        freshness: {
+          lastChecked: d.period || null,
+          schedule: 'Updates weekly automatically. Full quarterly sweep is manual — run it mid-to-late Aug, Nov, Feb, or May.'
         }
       };
    } catch (err) {
@@ -542,18 +557,22 @@ app.get('/api/ticker/:ticker', async (req, res) => {
           ? `Short interest ${shortInt.direction} as of ${d.settlementDate}`
           : shortInt.label,
         detail: shortInt.explanation,
-        freshness: { lastChecked: d.fetchedAt || null },
         validation: {
           timing: d.settlementDate
             ? `Settlement date ${d.settlementDate}. FINRA short interest is published twice monthly.`
             : 'No settlement data available.',
           scaleVsSalary: 'Not applicable to short interest.',
           trackRecord: 'No data available — requires logging past short interest moves vs. subsequent price outcomes.',
-          corroboration: d.trendScore >= 80
+         corroboration: d.trendScore >= 80
             ? shortInt.explanation.match(/consistent .*?trend/)?.[0] || 'Consistent multi-period trend.'
             : 'No confirmed multi-period trend yet.'
+        },
+        freshness: {
+          lastChecked: d.settlementDate || null,
+          schedule: 'Updates twice monthly (matches FINRA settlement dates)'
         }
       };
+      if (shortInt.hasSignal && shortInt.confidenceScore > 0) activeStatuses.push(signalsById.short_interest.status);
     } catch (err) {
       console.error(`Short interest signal failed for ${ticker}:`, err);
     }
@@ -577,7 +596,6 @@ app.get('/api/ticker/:ticker', async (req, res) => {
           ? `${d.volumeRatio?.toFixed(1)}x average call volume, ${d.callPutRatio?.toFixed(1)}:1 call/put ratio`
           : optVol.label,
         detail: optVol.explanation,
-        freshness: { lastChecked: d.fetchedAt || null },
         validation: {
           timing: optVol.hasSignal
             ? `Snapshot taken after market close. ${d.daysOfHistory} day(s) of baseline history.`
@@ -587,54 +605,49 @@ app.get('/api/ticker/:ticker', async (req, res) => {
           corroboration: optVol.hasSignal && d.volumeScore >= 70 && d.skewScore >= 70
             ? 'Both volume and call/put skew are elevated together — mutually reinforcing.'
             : 'No corroborating signal within options data alone.'
+        },
+        freshness: {
+          lastChecked: d.lastChecked || null,
+          schedule: 'Updates automatically, daily (weekdays)'
         }
       };
+      if (optVol.hasSignal && optVol.confidenceScore > 0) activeStatuses.push(signalsById.options_volume.status);
     } catch (err) {
       console.error(`Options volume signal failed for ${ticker}:`, err);
     }
 
     // Signal 2: Analyst ratings
-
-    // Signal 2: Analyst ratings
-
-    
-
-    // Signal 2: Analyst ratings
     const stockData = await getStockData(ticker);
     const analyst = getAnalystSignal(stockData.recommendations);
-    if (analyst) {
+   if (analyst) {
       scores.push(analyst.score);
       signalsById.analyst_rating = analyst;
       plainParts.push(`Analyst consensus: ${analyst.headline}.`);
+      activeStatuses.push(analyst.status);
     }
-
     const score = scores.length
       ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
       : 0;
 
     const tier = score >= 70 ? 'High' : score >= 50 ? 'Moderate' : 'Low';
     const action = score >= 70 ? 'BUY' : score >= 50 ? 'HOLD' : 'SELL';
-    const verdict = score >= 70 ? 'Trust' : score >= 50 ? 'Watch' : 'Ignore';
 
-    let priceTarget = { available: false };
+    let priceTarget = null;
     try {
-      priceTarget = await getPriceTarget(ticker, stockData.quote?.price);
+      priceTarget = await getPriceTarget(ticker);
     } catch (err) {
       console.error(`Price target lookup failed for ${ticker}:`, err);
     }
 
-    const totalSignals = SIGNAL_ORDER.length;
-    const signalQuality = {
-      activeSignals: scores.length,
-      totalSignals,
-      badge: scores.length === 0
-        ? 'No signals reporting — score not meaningful'
-        : scores.length <= totalSignals * 0.33
-        ? `Low signal coverage — ${scores.length} of ${totalSignals} active`
-        : scores.length <= totalSignals * 0.66
-        ? `Moderate signal coverage — ${scores.length} of ${totalSignals} active`
-        : `Strong signal coverage — ${scores.length} of ${totalSignals} active`
-    };
+    const { badge, headline, reasoning, priceTargetSentence } = getVerdict({
+      activeCount: scores.length,
+      statuses: activeStatuses,
+      priceTarget,
+    });
+
+    const signalsSummary = plainParts.length
+      ? plainParts.join(' ')
+      : `No signal data available for ${ticker} yet.`;
 
     res.json({
       ticker,
@@ -645,14 +658,12 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       convictionScore: score,
       tier,
       action,
-      signalQuality,
       activeSignals: scores.length,
-      plainEnglish: plainParts.length
-        ? plainParts.join(' ')
-        : `No signal data available for ${ticker} yet.`,
+      signalQuality: { badge, headline },
+      plainEnglish: signalsSummary,
       bottomLine: {
-        verdict,
-        reasoning: `Score of ${score}/100 based on ${scores.length} of 6 signals. The remaining ${6 - scores.length} have no data source yet.`
+        verdict: headline,
+        reasoning: `${priceTargetSentence.trim() ? priceTargetSentence.trim() + ' ' : ''}${reasoning}`
       },
       signals: SIGNAL_ORDER.map(m => normalize(m, signalsById[m.id]))
     });

@@ -21,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run price targets fetch
+      - name: Run price target fetch
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python fetch_price_targets.py

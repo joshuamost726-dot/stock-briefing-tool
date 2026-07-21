@@ -19,7 +19,7 @@ const MIN_HISTORY_DAYS = 5;
 
 async function getOptionsVolumeSignal(ticker) {
   const { rows } = await pool.query(
-    `SELECT snapshot_date, call_volume, put_volume, call_open_interest, put_open_interest, fetched_at
+    `SELECT snapshot_date, call_volume, put_volume, call_open_interest, put_open_interest
        FROM options_volume
       WHERE ticker = $1
       ORDER BY snapshot_date DESC
@@ -110,7 +110,7 @@ async function getOptionsVolumeSignal(ticker) {
       volumeScore,
       skewScore,
       daysOfHistory: history.length,
-      fetchedAt: today.fetched_at || null,
+      lastChecked: today.snapshot_date,
     },
   };
 }
