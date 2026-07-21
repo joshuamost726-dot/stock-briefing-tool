@@ -9,6 +9,7 @@ const { getInstitutionalBuyingSignal } = require('./convictionScore.js');
 const { getInsiderBuyingSignal } = require('./insiderScore.js');
 const { getShortInterestSignal } = require('./shortInterestScore.js');
 const { getOptionsVolumeSignal } = require('./optionsVolumeScore.js');
+const { getPriceTarget } = require('./priceTargetData.js');
 
 // Scores analyst consensus 0-100 from Finnhub recommendation trends.
 function getAnalystSignal(recommendations) {
@@ -409,22 +410,27 @@ app.get('/api/ticker/:ticker', async (req, res) => {
   }
 
   const SIGNAL_ORDER = [
-    { id: 'insider_buying',       label: 'Insider Buying' },
-    { id: 'institutional_buying', label: 'Institutional Buying' },
-    { id: 'earnings_whisper',     label: 'Earnings Whisper' },
-    { id: 'short_interest',       label: 'Short Interest' },
-    { id: 'analyst_rating',       label: 'Analyst Rating Change' },
-    { id: 'options_volume',       label: 'Options Call Volume' }
+    { id: 'insider_buying',       label: 'Insider Buying',        schedule: 'Runs daily at 8am ET' },
+    { id: 'institutional_buying', label: 'Institutional Buying',  schedule: '13F filings — updated weekly, plus periodic full sweeps' },
+    { id: 'earnings_whisper',     label: 'Earnings Whisper',      schedule: 'Not yet wired to a data source' },
+    { id: 'short_interest',       label: 'Short Interest',        schedule: 'FINRA settlement data — twice monthly (5th & 20th)' },
+    { id: 'analyst_rating',       label: 'Analyst Rating Change', schedule: 'Live — fetched fresh on every request' },
+    { id: 'options_volume',       label: 'Options Call Volume',   schedule: 'Weekdays after market close' }
   ];
 
   function normalize(meta, raw) {
     const v = (raw && raw.validation) || {};
+    const f = (raw && raw.freshness) || {};
     return {
       id: meta.id,
       label: meta.label,
       status: (raw && raw.status) || 'neutral',
       headline: (raw && raw.headline) || 'No signal detected',
       detail: (raw && raw.detail) || '',
+      freshness: {
+        lastChecked: f.lastChecked || null,
+        schedule: meta.schedule
+      },
       validation: {
         timing:        v.timing        || 'No data available',
         scaleVsSalary: v.scaleVsSalary || 'No data available',
@@ -458,6 +464,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
           ? `${d.buyCount} insider buy(s) from ${d.distinctBuyers} insider(s)`
           : insider.label,
         detail: insider.explanation,
+        freshness: { lastChecked: d.latestFiledAt || null },
         validation: {
           timing: d.timingScore != null
             ? `Timing sub-score ${d.timingScore}. Form 4s are filed within 2 business days of the transaction.`
@@ -535,6 +542,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
           ? `Short interest ${shortInt.direction} as of ${d.settlementDate}`
           : shortInt.label,
         detail: shortInt.explanation,
+        freshness: { lastChecked: d.fetchedAt || null },
         validation: {
           timing: d.settlementDate
             ? `Settlement date ${d.settlementDate}. FINRA short interest is published twice monthly.`
@@ -569,6 +577,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
           ? `${d.volumeRatio?.toFixed(1)}x average call volume, ${d.callPutRatio?.toFixed(1)}:1 call/put ratio`
           : optVol.label,
         detail: optVol.explanation,
+        freshness: { lastChecked: d.fetchedAt || null },
         validation: {
           timing: optVol.hasSignal
             ? `Snapshot taken after market close. ${d.daysOfHistory} day(s) of baseline history.`
@@ -607,14 +616,36 @@ app.get('/api/ticker/:ticker', async (req, res) => {
     const action = score >= 70 ? 'BUY' : score >= 50 ? 'HOLD' : 'SELL';
     const verdict = score >= 70 ? 'Trust' : score >= 50 ? 'Watch' : 'Ignore';
 
+    let priceTarget = { available: false };
+    try {
+      priceTarget = await getPriceTarget(ticker, stockData.quote?.price);
+    } catch (err) {
+      console.error(`Price target lookup failed for ${ticker}:`, err);
+    }
+
+    const totalSignals = SIGNAL_ORDER.length;
+    const signalQuality = {
+      activeSignals: scores.length,
+      totalSignals,
+      badge: scores.length === 0
+        ? 'No signals reporting — score not meaningful'
+        : scores.length <= totalSignals * 0.33
+        ? `Low signal coverage — ${scores.length} of ${totalSignals} active`
+        : scores.length <= totalSignals * 0.66
+        ? `Moderate signal coverage — ${scores.length} of ${totalSignals} active`
+        : `Strong signal coverage — ${scores.length} of ${totalSignals} active`
+    };
+
     res.json({
       ticker,
       companyName: tracked.name || ticker,
       quote: stockData.quote,
       profile: stockData.profile,
+      priceTarget,
       convictionScore: score,
       tier,
       action,
+      signalQuality,
       activeSignals: scores.length,
       plainEnglish: plainParts.length
         ? plainParts.join(' ')

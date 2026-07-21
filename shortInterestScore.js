@@ -16,7 +16,7 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 async function getShortInterestSignal(ticker) {
   const { rows } = await pool.query(
-    `SELECT settlement_date, short_interest_shares, avg_daily_share_volume, days_to_cover
+    `SELECT settlement_date, short_interest_shares, avg_daily_share_volume, days_to_cover, fetched_at
        FROM short_interest
       WHERE ticker = $1
       ORDER BY settlement_date DESC
@@ -127,6 +127,7 @@ async function getShortInterestSignal(ticker) {
       coverScore,
       trendScore,
       settlementDate: settlementDateStr,
+      fetchedAt: latest.fetched_at || null,
     },
   };
 }

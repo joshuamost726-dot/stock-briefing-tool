@@ -81,6 +81,10 @@ async function getInsiderBuyingSignal(ticker) {
 
   const distinctBuyers = new Set(buys.map(b => b.insider_name)).size;
   const totalBuyValue = buys.reduce((sum, b) => sum + (Number(b.value_usd) || 0), 0);
+  const latestFiledAt = buys
+    .map(b => b.filed_at)
+    .filter(Boolean)
+    .sort((a, b) => new Date(b) - new Date(a))[0] || null;
 
   let label;
   if (confidenceScore >= 80) label = 'High Conviction';
@@ -115,6 +119,7 @@ async function getInsiderBuyingSignal(ticker) {
       avgScale,
       timingScore,
       corroborationScore,
+      latestFiledAt,
     },
   };
 }
