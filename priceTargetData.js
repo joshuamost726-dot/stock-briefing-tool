@@ -47,8 +47,12 @@ async function getPriceTarget(ticker) {
     mean: meanTarget,
     median: Number(row.target_median),
     numAnalysts: row.num_analysts,
-    upsidePct,
+   upsidePct,
     asOf: row.snapshot_date,
+    freshness: {
+      lastChecked: row.snapshot_date,
+      schedule: 'Updates automatically, daily (weekdays)'
+    }
   };
 }
 
