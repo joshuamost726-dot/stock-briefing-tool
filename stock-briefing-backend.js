@@ -42,9 +42,13 @@ function getAnalystSignal(recommendations) {
       timing: `Consensus as of ${recommendations.period || 'latest period'}. Ratings lag price moves.`,
       scaleVsSalary: 'Not applicable to analyst ratings.',
       trackRecord: 'No data available — requires logging past rating changes vs outcomes.',
-      corroboration: total >= 10
+     corroboration: total >= 10
         ? `${total} analysts covering — broad coverage.`
         : `Only ${total} analyst(s) covering — thin coverage.`
+    },
+    freshness: {
+      lastChecked: null,
+      schedule: 'Fetched live every time this page loads'
     }
   };
 }
@@ -475,6 +479,10 @@ app.get('/api/ticker/:ticker', async (req, res) => {
             : d.distinctBuyers === 1
             ? 'Only one insider bought — no corroboration from others yet.'
             : `${d.sellCount ?? 0} routine sell(s) on file — not counted as corroboration.`
+        },
+        freshness: {
+          lastChecked: d.lastChecked,
+          schedule: 'Updates automatically, daily'
         }
       };
       if (insiderActive) activeStatuses.push(signalsById.insider_buying.status);
@@ -506,9 +514,12 @@ app.get('/api/ticker/:ticker', async (req, res) => {
           corroboration: d.holderCount > 1
             ? `${d.holderCount} funds hold a position.`
             : 'Single holder — no corroboration.'
+        },
+        freshness: {
+          lastChecked: d.period || null,
+          schedule: 'Updates weekly automatically. Full quarterly sweep is manual — run it mid-to-late Aug, Nov, Feb, or May.'
         }
       };
-      if (instScore > 0) activeStatuses.push(signalsById.institutional_buying.status);
    } catch (err) {
       console.error(`Institutional signal failed for ${ticker}:`, err);
     }
@@ -547,9 +558,13 @@ app.get('/api/ticker/:ticker', async (req, res) => {
             : 'No settlement data available.',
           scaleVsSalary: 'Not applicable to short interest.',
           trackRecord: 'No data available — requires logging past short interest moves vs. subsequent price outcomes.',
-          corroboration: d.trendScore >= 80
+         corroboration: d.trendScore >= 80
             ? shortInt.explanation.match(/consistent .*?trend/)?.[0] || 'Consistent multi-period trend.'
             : 'No confirmed multi-period trend yet.'
+        },
+        freshness: {
+          lastChecked: d.settlementDate || null,
+          schedule: 'Updates twice monthly (matches FINRA settlement dates)'
         }
       };
       if (shortInt.hasSignal && shortInt.confidenceScore > 0) activeStatuses.push(signalsById.short_interest.status);
@@ -585,6 +600,10 @@ app.get('/api/ticker/:ticker', async (req, res) => {
           corroboration: optVol.hasSignal && d.volumeScore >= 70 && d.skewScore >= 70
             ? 'Both volume and call/put skew are elevated together — mutually reinforcing.'
             : 'No corroborating signal within options data alone.'
+        },
+        freshness: {
+          lastChecked: d.lastChecked || null,
+          schedule: 'Updates automatically, daily (weekdays)'
         }
       };
       if (optVol.hasSignal && optVol.confidenceScore > 0) activeStatuses.push(signalsById.options_volume.status);
