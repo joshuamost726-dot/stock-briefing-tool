@@ -425,6 +425,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
 
   function normalize(meta, raw) {
     const v = (raw && raw.validation) || {};
+    const f = (raw && raw.freshness) || {};
     return {
       id: meta.id,
       label: meta.label,
@@ -436,6 +437,10 @@ app.get('/api/ticker/:ticker', async (req, res) => {
         scaleVsSalary: v.scaleVsSalary || 'No data available',
         trackRecord:   v.trackRecord   || 'No data available',
         corroboration: v.corroboration || 'No data available'
+      },
+      freshness: {
+        lastChecked: f.lastChecked || null,
+        schedule: f.schedule || 'No schedule data available'
       }
     };
   }
