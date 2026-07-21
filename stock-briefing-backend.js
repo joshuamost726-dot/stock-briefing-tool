@@ -633,7 +633,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       plainEnglish: signalsSummary,
       bottomLine: {
         verdict: headline,
-        reasoning: `${signalsSummary}${priceTargetSentence} ${reasoning}`
+        reasoning: `${priceTargetSentence.trim() ? priceTargetSentence.trim() + ' ' : ''}${reasoning}`
       },
       signals: SIGNAL_ORDER.map(m => normalize(m, signalsById[m.id]))
     });
