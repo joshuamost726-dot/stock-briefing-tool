@@ -1,0 +1,148 @@
+"""
+fetch_offexchange.py
+
+Pulls daily off-exchange (FINRA ATS/dark pool) volume data from Quiver
+Quantitative for tracked tickers and stores it in the off_exchange_volume
+table.
+
+Data source: https://api.quiverquant.com/beta/historical/offexchange/{TICKER}
+- Requires QUIVER_API_KEY (same Hobbyist-tier key already used elsewhere)
+- Returns a rolling window of recent daily rows per call. Upserts on
+  (ticker, trade_date) rather than delete+reinsert, since this is a daily
+  time series we want to keep accumulating history for (unlike
+  congress_trades/gov_contracts, which are small, mostly-static tables where
+  a full replace is cheap and simplest).
+
+Usage:
+  python fetch_offexchange.py
+
+Notes:
+- SKHY (Korean listing) and CWBHF (Toronto listing) are excluded — FINRA
+  off-exchange data only covers US-listed securities.
+"""
+
+import os
+import sys
+from datetime import datetime
+
+import requests
+import psycopg2
+
+# --- Config ---------------------------------------------------------------
+
+TRACKED_TICKERS = ["RILY", "ASTS", "LRCX", "QCOM"]
+# SKHY and CWBHF intentionally excluded — foreign listings, no FINRA coverage
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+QUIVER_API_KEY = os.environ.get("QUIVER_API_KEY")
+
+HEADERS = {
+    "accept": "application/json",
+}
+
+
+# --- Schema ------------------------------------------------------------
+
+CREATE_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS off_exchange_volume (
+        id SERIAL PRIMARY KEY,
+        ticker TEXT NOT NULL,
+        trade_date DATE NOT NULL,
+        otc_short NUMERIC,
+        otc_total NUMERIC,
+        dpi NUMERIC,
+        fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (ticker, trade_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_off_exchange_volume_ticker ON off_exchange_volume(ticker);
+"""
+
+
+# --- Fetch -------------------------------------------------------------
+
+def fetch_offexchange(ticker):
+    url = f"https://api.quiverquant.com/beta/historical/offexchange/{ticker}"
+    headers = {**HEADERS, "Authorization": f"Token {QUIVER_API_KEY}"}
+    resp = requests.get(url, headers=headers, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def parse_rows(ticker, raw_rows):
+    parsed = []
+    for row in raw_rows:
+        try:
+            trade_date = datetime.strptime(row["Date"], "%Y-%m-%d").date()
+            parsed.append({
+                "ticker": ticker,
+                "trade_date": trade_date,
+                "otc_short": row.get("OTC_Short"),
+                "otc_total": row.get("OTC_Total"),
+                "dpi": row.get("DPI"),
+            })
+        except (KeyError, ValueError) as e:
+            print(f"  [DEBUG] Skipping malformed row for {ticker}: {row} ({e})")
+            continue
+    return parsed
+
+
+# --- Database --------------------------------------------------------------
+
+def upsert_rows(conn, rows):
+    query = """
+        INSERT INTO off_exchange_volume (ticker, trade_date, otc_short, otc_total, dpi)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (ticker, trade_date) DO UPDATE SET
+            otc_short = EXCLUDED.otc_short,
+            otc_total = EXCLUDED.otc_total,
+            dpi = EXCLUDED.dpi,
+            fetched_at = NOW()
+    """
+    with conn.cursor() as cur:
+        for r in rows:
+            cur.execute(query, (r["ticker"], r["trade_date"], r["otc_short"], r["otc_total"], r["dpi"]))
+    conn.commit()
+    return len(rows)
+
+
+# --- Main --------------------------------------------------------------
+
+def main():
+    if not DATABASE_URL:
+        print("ERROR: DATABASE_URL environment variable not set.")
+        sys.exit(1)
+    if not QUIVER_API_KEY:
+        print("ERROR: QUIVER_API_KEY environment variable not set.")
+        sys.exit(1)
+
+    conn = psycopg2.connect(DATABASE_URL)
+    with conn.cursor() as cur:
+        cur.execute(CREATE_TABLE_SQL)
+    conn.commit()
+
+    total = 0
+
+    for ticker in TRACKED_TICKERS:
+        print(f"\n--- {ticker} ---")
+        try:
+            raw_rows = fetch_offexchange(ticker)
+        except requests.RequestException as e:
+            print(f"  Failed to fetch: {e}")
+            continue
+
+        print(f"  Found {len(raw_rows)} daily row(s)")
+        parsed = parse_rows(ticker, raw_rows)
+        try:
+            affected = upsert_rows(conn, parsed)
+            total += affected
+            print(f"  {affected} rows upserted")
+        except Exception as e:
+            print(f"  Failed to upsert: {e}")
+            conn.rollback()
+
+    conn.close()
+    print(f"\nDone. Total rows upserted: {total}")
+
+
+if __name__ == "__main__":
+    main()

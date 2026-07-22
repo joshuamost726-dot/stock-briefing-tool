@@ -1,0 +1,29 @@
+name: Fetch Off-Exchange Volume
+
+on:
+  schedule:
+    # 10:30pm UTC, Monday-Friday — after market close, same window as the
+    # other daily fetch jobs.
+    - cron: '30 22 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  fetch-offexchange:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run off-exchange volume fetch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          QUIVER_API_KEY: ${{ secrets.QUIVER_API_KEY }}
+        run: python fetch_offexchange.py

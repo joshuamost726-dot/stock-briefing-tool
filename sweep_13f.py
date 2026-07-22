@@ -1,9 +1,19 @@
 """
 sweep_13f.py — full 13F-HR sweep for a quarter.
+
+YEAR/QUARTER default to the CURRENT calendar quarter (the quarter filings are
+being FILED in, not the quarter being reported on — a 13F-HR filed in, say,
+2026 Q3 reports holdings as of 2026-06-30). This runs automatically on a
+schedule (see .github/workflows/sweep-13f.yml, timed a few days after each
+quarter's 45-day SEC filing deadline) — override with --year/--quarter for a
+manual backfill of a different quarter.
 """
 
+import argparse
 import os
 import time
+from datetime import date
+
 import psycopg2
 from psycopg2.extras import execute_values
 from edgar import set_identity, get_filings
@@ -13,8 +23,23 @@ set_identity(SEC_IDENTITY)
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 
-YEAR = 2026
-QUARTER = 2
+
+def current_quarter():
+    today = date.today()
+    return today.year, (today.month - 1) // 3 + 1
+
+
+def parse_args():
+    default_year, default_quarter = current_quarter()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--year", type=int, default=default_year)
+    parser.add_argument("--quarter", type=int, default=default_quarter, choices=[1, 2, 3, 4])
+    return parser.parse_args()
+
+
+_args = parse_args()
+YEAR = _args.year
+QUARTER = _args.quarter
 
 CUSIP_TO_TICKER = {
     "00217D100": "ASTS",

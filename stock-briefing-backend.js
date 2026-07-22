@@ -10,6 +10,9 @@ const { getInsiderBuyingSignal } = require('./insiderScore.js');
 const { getShortInterestSignal } = require('./shortInterestScore.js');
 const { getOptionsVolumeSignal } = require('./optionsVolumeScore.js');
 const { getCongressTradingSignal } = require('./congressTradingScore.js');
+const { getGovContractsSignal } = require('./govContractsScore.js');
+const { getOffExchangeSignal } = require('./offExchangeScore.js');
+const { getWsbSentimentSignal } = require('./wsbSentimentScore.js');
 const { getPriceTarget } = require('./priceTargetData.js');
 const { getVerdict } = require('./noiseScore.js');
 const { explainSignalPlainly } = require('./signalExplainer.js');
@@ -279,6 +282,133 @@ async function computeAllSignals(ticker, stockData) {
     console.error(`Congressional trading signal failed for ${ticker}:`, err);
   }
 
+  // Signal: Government contracts
+  try {
+    const gov = await getGovContractsSignal(ticker);
+    const d = gov.detail || {};
+
+    if (gov.hasSignal && gov.confidenceScore > 0) {
+      scores.push(gov.confidenceScore);
+      plainParts.push(gov.explanation);
+    }
+
+    signalsById.gov_contracts = {
+      hasData: gov.hasSignal,
+      status: !gov.hasSignal ? 'neutral'
+            : gov.confidenceScore >= 70 ? 'positive'
+            : gov.confidenceScore >= 50 ? 'neutral'
+            : 'negative',
+      headline: gov.hasSignal
+        ? `$${Math.round(d.recentTotal || 0).toLocaleString()} in recent federal contracts`
+        : gov.label,
+      detail: gov.explanation,
+      validation: {
+        timing: d.timingScore != null
+          ? `Timing sub-score ${d.timingScore}. Most recent contract: ${d.mostRecentPeriod || 'n/a'}.`
+          : 'No recent contract activity to time.',
+        scaleVsSalary: 'Not applicable to government contracts.',
+        trackRecord: d.baseline != null
+          ? `Compared against this company's own historical average contract size.`
+          : 'No prior contract history for this company to compare against.',
+        corroboration: d.corroborationScore >= 70
+          ? 'Contracts reported across multiple recent quarters.'
+          : 'Single quarter of recent activity — not yet a multi-period pattern.'
+      },
+      freshness: {
+        lastChecked: d.lastChecked || null,
+        schedule: 'Updates automatically, daily on weekdays'
+      }
+    };
+    if (gov.hasSignal && gov.confidenceScore > 0) activeStatuses.push(signalsById.gov_contracts.status);
+  } catch (err) {
+    console.error(`Government contracts signal failed for ${ticker}:`, err);
+  }
+
+  // Signal: Off-exchange (dark pool) volume
+  try {
+    const offEx = await getOffExchangeSignal(ticker);
+    const d = offEx.detail || {};
+
+    if (offEx.hasSignal && offEx.confidenceScore > 0) {
+      // Rising short-side share off-exchange leans bearish-ish, falling leans
+      // less-bearish — same bullish-contribution convention as short_interest.
+      const bullishContribution = offEx.direction === 'decreasing'
+        ? offEx.confidenceScore
+        : offEx.direction === 'increasing'
+        ? 100 - offEx.confidenceScore
+        : 50;
+
+      scores.push(bullishContribution);
+      plainParts.push(offEx.explanation);
+    }
+
+    signalsById.off_exchange = {
+      hasData: offEx.hasSignal,
+      status: !offEx.hasSignal ? 'neutral'
+            : offEx.direction === 'decreasing' ? 'positive'
+            : offEx.direction === 'increasing' ? 'negative'
+            : 'neutral',
+      headline: offEx.hasSignal
+        ? `Off-exchange short-side share ${offEx.direction}`
+        : offEx.label,
+      detail: offEx.explanation,
+      validation: {
+        timing: d.lastChecked
+          ? `Snapshot as of ${d.lastChecked}. FINRA off-exchange data updates daily.`
+          : 'No settlement data available.',
+        scaleVsSalary: 'Not applicable to off-exchange volume.',
+        trackRecord: 'No data available — requires logging past off-exchange moves vs. subsequent price outcomes.',
+        corroboration: d.volumeScore >= 70
+          ? 'Both overall off-exchange volume and short-side share are elevated together.'
+          : 'No corroborating volume spike alongside this move.'
+      },
+      freshness: {
+        lastChecked: d.lastChecked || null,
+        schedule: 'Updates automatically, daily (weekdays)'
+      }
+    };
+    if (offEx.hasSignal && offEx.confidenceScore > 0) activeStatuses.push(signalsById.off_exchange.status);
+  } catch (err) {
+    console.error(`Off-exchange signal failed for ${ticker}:`, err);
+  }
+
+  // Signal: WallStreetBets / Reddit retail attention
+  try {
+    const wsb = await getWsbSentimentSignal(ticker);
+    const d = wsb.detail || {};
+
+    if (wsb.hasSignal && wsb.confidenceScore > 0) {
+      plainParts.push(wsb.explanation);
+      // Deliberately NOT pushed into `scores` — mention volume has no
+      // established directional relationship to price the way the other
+      // signals do, so it's surfaced as context, not averaged into
+      // convictionScore. See wsbSentimentScore.js's design note.
+    }
+
+    signalsById.wsb_sentiment = {
+      hasData: wsb.hasSignal,
+      status: !wsb.hasSignal ? 'neutral' : 'neutral',
+      headline: wsb.hasSignal
+        ? `${d.todayMentions} Reddit mention(s) today${d.todayRank != null ? ` (rank #${d.todayRank})` : ''}`
+        : wsb.label,
+      detail: wsb.explanation,
+      validation: {
+        timing: d.lastChecked
+          ? `Snapshot as of ${d.lastChecked}. Updates daily, including weekends.`
+          : 'No mention data available.',
+        scaleVsSalary: 'Not applicable to Reddit mention volume.',
+        trackRecord: 'No data available — mention volume has no established directional relationship to price.',
+        corroboration: 'Mention volume only — does not corroborate or contradict other signals by design.'
+      },
+      freshness: {
+        lastChecked: d.lastChecked || null,
+        schedule: 'Updates automatically, daily (including weekends)'
+      }
+    };
+  } catch (err) {
+    console.error(`WSB sentiment signal failed for ${ticker}:`, err);
+  }
+
   // Signal 2: Analyst ratings
   const analyst = getAnalystSignal(stockData.recommendations);
   if (analyst) {
@@ -307,13 +437,16 @@ async function computeAllSignals(ticker, stockData) {
 }
 
 const SIGNAL_ORDER = [
-  { id: 'insider_buying',       label: 'Insider Buying',        source: 'SEC EDGAR (Form 4)' },
-  { id: 'institutional_buying', label: 'Institutional Buying',  source: 'SEC EDGAR (13F)' },
-  { id: 'earnings_whisper',     label: 'Earnings Whisper',      source: null },
-  { id: 'short_interest',       label: 'Short Interest',        source: 'FINRA (via Nasdaq)' },
-  { id: 'analyst_rating',       label: 'Analyst Rating Change', source: 'Finnhub' },
-  { id: 'options_volume',       label: 'Options Call Volume',   source: 'Yahoo Finance' },
-  { id: 'congress_trading',     label: 'Congressional Trading', source: 'Quiver Quantitative' }
+  { id: 'insider_buying',       label: 'Insider Buying',        source: 'SEC EDGAR (Form 4)',    category: 'Company Filings' },
+  { id: 'institutional_buying', label: 'Institutional Buying',  source: 'SEC EDGAR (13F)',       category: 'Company Filings' },
+  { id: 'earnings_whisper',     label: 'Earnings Whisper',      source: null,                    category: 'Analyst & Estimates' },
+  { id: 'analyst_rating',       label: 'Analyst Rating Change', source: 'Finnhub',               category: 'Analyst & Estimates' },
+  { id: 'short_interest',       label: 'Short Interest',        source: 'FINRA (via Nasdaq)',    category: 'Market Activity' },
+  { id: 'options_volume',       label: 'Options Call Volume',   source: 'Yahoo Finance',         category: 'Market Activity' },
+  { id: 'off_exchange',        label: 'Off-Exchange Volume',   source: 'Quiver Quantitative',   category: 'Market Activity' },
+  { id: 'congress_trading',     label: 'Congressional Trading', source: 'Quiver Quantitative',   category: 'Government & Political' },
+  { id: 'gov_contracts',        label: 'Government Contracts',  source: 'Quiver Quantitative',   category: 'Government & Political' },
+  { id: 'wsb_sentiment',        label: 'Reddit / WSB Attention', source: 'ApeWisdom',            category: 'Retail Sentiment' }
 ];
 
 function normalize(meta, raw) {
@@ -323,6 +456,7 @@ function normalize(meta, raw) {
     id: meta.id,
     label: meta.label,
     source: meta.source || null,
+    category: meta.category || 'Other',
     status: (raw && raw.status) || 'neutral',
     headline: (raw && raw.headline) || 'No signal detected',
     detail: (raw && raw.detail) || '',

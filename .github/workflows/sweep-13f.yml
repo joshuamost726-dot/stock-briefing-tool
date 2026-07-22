@@ -1,12 +1,18 @@
 name: Sweep 13F
 
 on:
-  workflow_dispatch:
+  schedule:
+    # 20th of Feb/May/Aug/Nov at 6am UTC — a few days after each quarter's
+    # 45-day SEC 13F-HR filing deadline (quarter-end + 45 days), so most
+    # funds have filed by the time this runs. sweep_13f.py computes the
+    # correct year/quarter from the run date automatically.
+    - cron: '0 6 20 2,5,8,11 *'
+  workflow_dispatch:   # allows a manual run (e.g. to backfill a different quarter)
 
 jobs:
   sweep:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
