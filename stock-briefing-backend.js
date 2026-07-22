@@ -74,7 +74,17 @@ async function computeAllSignals(ticker, stockData) {
   const plainParts = [];
   const activeStatuses = [];
 
+  // Each signal below hits its own DB query or external API independently of
+  // every other one — they used to run one after another (8 sequential round
+  // trips), which was a real chunk of this page's load time. Collecting them
+  // as promises and awaiting together at the end runs them concurrently
+  // instead; each callback still mutates the shared arrays/object above, but
+  // since only one callback body executes at a time on JS's single event
+  // loop, that's safe without any locking.
+  const signalPromises = [];
+
   // Signal 0: Insider buying (Form 4)
+  signalPromises.push((async () => {
   try {
     const insider = await getInsiderBuyingSignal(ticker);
 
@@ -119,8 +129,10 @@ async function computeAllSignals(ticker, stockData) {
   } catch (err) {
     console.error(`Insider signal failed for ${ticker}:`, err);
   }
+  })());
 
   // Signal 1: Institutional buying
+  signalPromises.push((async () => {
   try {
     const signal = await getInstitutionalBuyingSignal(ticker);
     const instScore = signal?.confidenceScore ?? 0;
@@ -154,8 +166,10 @@ async function computeAllSignals(ticker, stockData) {
   } catch (err) {
     console.error(`Institutional signal failed for ${ticker}:`, err);
   }
+  })());
 
   // Signal: Short interest
+  signalPromises.push((async () => {
   try {
     const shortInt = await getShortInterestSignal(ticker);
     const d = shortInt.detail || {};
@@ -203,8 +217,10 @@ async function computeAllSignals(ticker, stockData) {
   } catch (err) {
     console.error(`Short interest signal failed for ${ticker}:`, err);
   }
+  })());
 
   // Signal: Options call volume
+  signalPromises.push((async () => {
   try {
     const optVol = await getOptionsVolumeSignal(ticker);
     const d = optVol.detail || {};
@@ -243,8 +259,10 @@ async function computeAllSignals(ticker, stockData) {
   } catch (err) {
     console.error(`Options volume signal failed for ${ticker}:`, err);
   }
+  })());
 
   // Signal: Congressional trading
+  signalPromises.push((async () => {
   try {
     const congress = await getCongressTradingSignal(ticker);
     const d = congress.detail || {};
@@ -285,8 +303,10 @@ async function computeAllSignals(ticker, stockData) {
   } catch (err) {
     console.error(`Congressional trading signal failed for ${ticker}:`, err);
   }
+  })());
 
   // Signal: Government contracts
+  signalPromises.push((async () => {
   try {
     const gov = await getGovContractsSignal(ticker);
     const d = gov.detail || {};
@@ -327,8 +347,10 @@ async function computeAllSignals(ticker, stockData) {
   } catch (err) {
     console.error(`Government contracts signal failed for ${ticker}:`, err);
   }
+  })());
 
   // Signal: Off-exchange (dark pool) volume
+  signalPromises.push((async () => {
   try {
     const offEx = await getOffExchangeSignal(ticker);
     const d = offEx.detail || {};
@@ -375,8 +397,10 @@ async function computeAllSignals(ticker, stockData) {
   } catch (err) {
     console.error(`Off-exchange signal failed for ${ticker}:`, err);
   }
+  })());
 
   // Signal: WallStreetBets / Reddit retail attention
+  signalPromises.push((async () => {
   try {
     const wsb = await getWsbSentimentSignal(ticker);
     const d = wsb.detail || {};
@@ -412,6 +436,9 @@ async function computeAllSignals(ticker, stockData) {
   } catch (err) {
     console.error(`WSB sentiment signal failed for ${ticker}:`, err);
   }
+  })());
+
+  await Promise.all(signalPromises);
 
   // Signal 2: Analyst ratings
   const analyst = getAnalystSignal(stockData.recommendations);
@@ -628,10 +655,16 @@ async function getNews(ticker, companyName) {
 // Generate comprehensive briefing
 async function getStockData(ticker) {
   try {
-    const quote = await getStockQuote(ticker);
-    const profile = await getCompanyProfile(ticker);
-    const recommendations = await getRecommendationTrends(ticker);
-    const earnings = await getEarningsCalendar(ticker);
+    // These four are independent of each other — running them sequentially
+    // (as this used to) means paying for 4 round trips back to back instead
+    // of 1. news needs profile.name, so it starts right after that group
+    // resolves rather than joining it.
+    const [quote, profile, recommendations, earnings] = await Promise.all([
+      getStockQuote(ticker),
+      getCompanyProfile(ticker),
+      getRecommendationTrends(ticker),
+      getEarningsCalendar(ticker),
+    ]);
     const news = await getNews(ticker, profile?.name);
 
     if (!quote) {
@@ -848,8 +881,10 @@ app.get('/api/briefing/latest', async (req, res) => {
       data.stocks.map(stock => getStockData(stock.ticker))
     );
 
-   // Attach conviction score to each stock — same signal set as /api/ticker/:ticker
-    for (const stock of stocksData) {
+   // Attach conviction score to each stock — same signal set as /api/ticker/:ticker.
+    // Each stock's signal computation is independent of every other stock's,
+    // so run all 6 concurrently instead of one at a time.
+    await Promise.all(stocksData.map(async (stock) => {
       const { scores, plainParts } = await computeAllSignals(stock.ticker, stock);
 
       stock.explanation = plainParts.length ? plainParts.join(' ') : 'No signal data available';
@@ -858,7 +893,7 @@ app.get('/api/briefing/latest', async (req, res) => {
       stock.convictionScore = scores.length
         ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
         : 0;
-    }
+    }));
 
     let briefing = '📈 STOCK BRIEFING REPORT\n';
     briefing += `Generated: ${new Date().toLocaleString()}\n`;
@@ -886,7 +921,17 @@ app.get('/api/ticker/:ticker', async (req, res) => {
   }
 
   try {
-    const stockData = await getStockData(ticker);
+    // stockData (Finnhub/NewsAPI) and priceTarget (Yahoo) are independent —
+    // no reason to fetch them one after another.
+    const [stockData, priceTargetResult] = await Promise.all([
+      getStockData(ticker),
+      getPriceTarget(ticker).catch(err => {
+        console.error(`Price target lookup failed for ${ticker}:`, err);
+        return null;
+      }),
+    ]);
+    const priceTarget = priceTargetResult;
+
     const { signalsById, scores, plainParts, activeStatuses } = await computeAllSignals(ticker, stockData);
 
     const score = scores.length
@@ -905,29 +950,21 @@ app.get('/api/ticker/:ticker', async (req, res) => {
     });
     const { tier, action } = positionAdvice;
 
-    let priceTarget = null;
-    try {
-      priceTarget = await getPriceTarget(ticker);
-    } catch (err) {
-      console.error(`Price target lookup failed for ${ticker}:`, err);
-    }
-
-    const { badge, headline, reasoning } = await getVerdict({
-      activeCount: scores.length,
-      statuses: activeStatuses,
-      priceTarget,
-      totalSignals: SIGNAL_ORDER.length,
-    });
-
     const signalsSummary = plainParts.length
       ? plainParts.join(' ')
       : `No signal data available for ${ticker} yet.`;
 
-    const bottomLine = { verdict: headline, reasoning };
-
-    // News, upcoming dates, and the AI take are independent of each other
-    // and of everything above — run them concurrently rather than serially.
-    const [newsWithMeaning, upcoming, aiTake] = await Promise.all([
+    // The verdict, news explanations, upcoming dates, and the AI take don't
+    // depend on each other — run all four concurrently. (aiTake used to
+    // wait on the verdict just to mention it as context; it gets the same
+    // score/tier directly instead, so that dependency was removable.)
+    const [{ badge, headline, reasoning }, newsWithMeaning, upcoming, aiTake] = await Promise.all([
+      getVerdict({
+        activeCount: scores.length,
+        statuses: activeStatuses,
+        priceTarget,
+        totalSignals: SIGNAL_ORDER.length,
+      }),
       explainNewsForTicker(ticker, tracked.name, stockData.news),
       Promise.resolve(getUpcomingEvents(stockData.nextEarnings)),
       getAiTake({
@@ -937,11 +974,12 @@ app.get('/api/ticker/:ticker', async (req, res) => {
         profile: stockData.profile,
         convictionScore: score,
         tier,
-        bottomLine,
         plainParts,
         priceTarget,
       }),
     ]);
+
+    const bottomLine = { verdict: headline, reasoning };
 
     res.json({
       ticker,
