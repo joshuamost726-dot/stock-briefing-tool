@@ -449,10 +449,17 @@ async function computeAllSignals(ticker, stockData) {
     activeStatuses.push(analyst.status);
   }
 
-  // Rewrite each data-bearing signal's headline into a short plain-English
-  // explanation via Claude, in parallel. Signals with no data keep their
-  // existing headline as-is — already about as simple as it gets, not worth
-  // a Claude call.
+  return { signalsById, scores, plainParts, activeStatuses };
+}
+
+// Rewrites each data-bearing signal's headline into a short plain-English
+// explanation via Claude, in parallel. Signals with no data keep their
+// existing headline as-is — already about as simple as it gets, not worth a
+// Claude call. Deliberately NOT part of computeAllSignals() — it only
+// touches signalsById.simpleExplanation, which nothing else (verdict, news,
+// AI take) depends on, so the caller runs this alongside those instead of
+// waiting for it first.
+async function explainSignalsPlainly(signalsById) {
   await Promise.all(
     Object.values(signalsById)
       .filter(s => s.hasData)
@@ -463,8 +470,7 @@ async function computeAllSignals(ticker, stockData) {
         });
       })
   );
-
-  return { signalsById, scores, plainParts, activeStatuses };
+  return signalsById;
 }
 
 const SIGNAL_ORDER = [
@@ -954,10 +960,13 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       ? plainParts.join(' ')
       : `No signal data available for ${ticker} yet.`;
 
-    // The verdict, news explanations, upcoming dates, and the AI take don't
-    // depend on each other — run all four concurrently. (aiTake used to
-    // wait on the verdict just to mention it as context; it gets the same
-    // score/tier directly instead, so that dependency was removable.)
+    // The verdict, news explanations, upcoming dates, the AI take, and the
+    // per-signal-card Claude rewrites don't depend on each other — run all
+    // five concurrently instead of the signal-card rewrites finishing first
+    // (which is what happened while that step lived inside
+    // computeAllSignals). (aiTake used to wait on the verdict just to
+    // mention it as context; it gets the same score/tier directly instead,
+    // so that dependency was removable.)
     const [{ badge, headline, reasoning }, newsWithMeaning, upcoming, aiTake] = await Promise.all([
       getVerdict({
         activeCount: scores.length,
@@ -977,6 +986,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
         plainParts,
         priceTarget,
       }),
+      explainSignalsPlainly(signalsById),
     ]);
 
     const bottomLine = { verdict: headline, reasoning };
