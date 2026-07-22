@@ -1,0 +1,28 @@
+name: Fetch Congress Trades
+
+on:
+  schedule:
+    # 10pm UTC = 6pm ET (after market close), Monday-Friday only
+    - cron: '0 22 * * 1-5'
+  workflow_dispatch:   # allows manual trigger from the Actions tab too
+
+jobs:
+  fetch-congress-trades:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run congress trades fetch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          QUIVER_API_KEY: ${{ secrets.QUIVER_API_KEY }}
+        run: python fetch_congress_trades.py

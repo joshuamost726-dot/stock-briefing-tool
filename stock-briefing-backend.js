@@ -9,6 +9,7 @@ const { getInstitutionalBuyingSignal } = require('./convictionScore.js');
 const { getInsiderBuyingSignal } = require('./insiderScore.js');
 const { getShortInterestSignal } = require('./shortInterestScore.js');
 const { getOptionsVolumeSignal } = require('./optionsVolumeScore.js');
+const { getCongressTradingSignal } = require('./congressTradingScore.js');
 const { getPriceTarget } = require('./priceTargetData.js');
 const { getVerdict } = require('./noiseScore.js');
 
@@ -52,6 +53,271 @@ function getAnalystSignal(recommendations) {
     }
   };
 }
+
+// Runs every signal for a ticker (insider buying, institutional buying, short
+// interest, options volume, congressional trading, analyst rating) and
+// returns the raw per-signal detail plus the aggregation inputs
+// (scores/plainParts/activeStatuses) both /api/ticker/:ticker and
+// /api/briefing/latest need. Shared so the two endpoints can't drift out of
+// sync on which signals actually get checked.
+async function computeAllSignals(ticker, stockData) {
+  const signalsById = {};
+  const scores = [];
+  const plainParts = [];
+  const activeStatuses = [];
+
+  // Signal 0: Insider buying (Form 4)
+  try {
+    const insider = await getInsiderBuyingSignal(ticker);
+
+    if (insider.hasSignal && insider.confidenceScore > 0) {
+      scores.push(insider.confidenceScore);
+      plainParts.push(insider.explanation);
+    }
+    const insiderActive = insider.hasSignal && insider.confidenceScore > 0;
+
+    const d = insider.detail || {};
+
+    signalsById.insider_buying = {
+      status: !insider.hasSignal ? 'neutral'
+            : insider.confidenceScore >= 70 ? 'positive'
+            : insider.confidenceScore >= 50 ? 'neutral'
+            : 'negative',
+      headline: insider.hasSignal
+        ? `${d.buyCount} insider buy(s) from ${d.distinctBuyers} insider(s)`
+        : insider.label,
+      detail: insider.explanation,
+      validation: {
+        timing: d.timingScore != null
+          ? `Timing sub-score ${d.timingScore}. Form 4s are filed within 2 business days of the transaction.`
+          : 'No buy activity to time.',
+        scaleVsSalary: insider.hasSignal
+          ? `Average scale-vs-salary sub-score ${Math.round(d.avgScale ?? 0)}/100 across ${d.buyCount} buy(s).`
+          : 'No buy activity to compare against compensation.',
+        trackRecord: 'No data available — requires accumulated history of past buys vs. subsequent price moves.',
+        corroboration: d.distinctBuyers > 1
+          ? `${d.distinctBuyers} distinct insiders bought — corroborated.`
+          : d.distinctBuyers === 1
+          ? 'Only one insider bought — no corroboration from others yet.'
+          : `${d.sellCount ?? 0} routine sell(s) on file — not counted as corroboration.`
+      },
+      freshness: {
+        lastChecked: d.lastChecked,
+        schedule: 'Updates automatically, daily'
+      }
+    };
+    if (insiderActive) activeStatuses.push(signalsById.insider_buying.status);
+  } catch (err) {
+    console.error(`Insider signal failed for ${ticker}:`, err);
+  }
+
+  // Signal 1: Institutional buying
+  try {
+    const signal = await getInstitutionalBuyingSignal(ticker);
+    const instScore = signal?.confidenceScore ?? 0;
+    const d = signal?.detail || {};
+
+    if (instScore > 0) {
+      scores.push(instScore);
+      plainParts.push(signal.explanation);
+    }
+
+    signalsById.institutional_buying = {
+      status: instScore >= 70 ? 'positive' : instScore >= 50 ? 'neutral' : 'negative',
+      headline: d.holderCount
+        ? `${d.holderCount.toLocaleString()} institutional holder(s) on file`
+        : 'No institutional holdings on file',
+      detail: signal?.explanation || '',
+      validation: {
+        timing: `Timing sub-score ${d.timingScore ?? 'n/a'}. 13F filings lag up to 45 days.`,
+        scaleVsSalary: 'Not applicable to institutional filings.',
+        trackRecord: `Track record sub-score ${d.trackRecordScore ?? 'n/a'}.`,
+        corroboration: d.holderCount > 1
+          ? `${d.holderCount} funds hold a position.`
+          : 'Single holder — no corroboration.'
+      },
+      freshness: {
+        lastChecked: d.period || null,
+        schedule: 'Updates weekly automatically. Full quarterly sweep is manual — run it mid-to-late Aug, Nov, Feb, or May.'
+      }
+    };
+  } catch (err) {
+    console.error(`Institutional signal failed for ${ticker}:`, err);
+  }
+
+  // Signal: Short interest
+  try {
+    const shortInt = await getShortInterestSignal(ticker);
+    const d = shortInt.detail || {};
+
+    if (shortInt.hasSignal && shortInt.confidenceScore > 0) {
+      // Convert strength+direction into a bullish-oriented contribution:
+      // falling short interest (shorts covering) leans bullish;
+      // rising short interest leans bearish absent a confirmed squeeze.
+      const bullishContribution = shortInt.direction === 'decreasing'
+        ? shortInt.confidenceScore
+        : shortInt.direction === 'increasing'
+        ? 100 - shortInt.confidenceScore
+        : 50;
+
+      scores.push(bullishContribution);
+      plainParts.push(shortInt.explanation);
+    }
+
+    signalsById.short_interest = {
+      status: !shortInt.hasSignal ? 'neutral'
+            : shortInt.direction === 'decreasing' ? 'positive'
+            : shortInt.direction === 'increasing' ? 'negative'
+            : 'neutral',
+      headline: shortInt.hasSignal
+        ? `Short interest ${shortInt.direction} as of ${d.settlementDate}`
+        : shortInt.label,
+      detail: shortInt.explanation,
+      validation: {
+        timing: d.settlementDate
+          ? `Settlement date ${d.settlementDate}. FINRA short interest is published twice monthly.`
+          : 'No settlement data available.',
+        scaleVsSalary: 'Not applicable to short interest.',
+        trackRecord: 'No data available — requires logging past short interest moves vs. subsequent price outcomes.',
+        corroboration: d.trendScore >= 80
+          ? shortInt.explanation.match(/consistent .*?trend/)?.[0] || 'Consistent multi-period trend.'
+          : 'No confirmed multi-period trend yet.'
+      },
+      freshness: {
+        lastChecked: d.settlementDate || null,
+        schedule: 'Updates twice monthly (matches FINRA settlement dates)'
+      }
+    };
+    if (shortInt.hasSignal && shortInt.confidenceScore > 0) activeStatuses.push(signalsById.short_interest.status);
+  } catch (err) {
+    console.error(`Short interest signal failed for ${ticker}:`, err);
+  }
+
+  // Signal: Options call volume
+  try {
+    const optVol = await getOptionsVolumeSignal(ticker);
+    const d = optVol.detail || {};
+
+    if (optVol.hasSignal && optVol.confidenceScore > 0) {
+      scores.push(optVol.confidenceScore);
+      plainParts.push(optVol.explanation);
+    }
+
+    signalsById.options_volume = {
+      status: !optVol.hasSignal ? 'neutral'
+            : optVol.confidenceScore >= 70 ? 'positive'
+            : optVol.confidenceScore >= 50 ? 'neutral'
+            : 'negative',
+      headline: optVol.hasSignal
+        ? `${d.volumeRatio?.toFixed(1)}x average call volume, ${d.callPutRatio?.toFixed(1)}:1 call/put ratio`
+        : optVol.label,
+      detail: optVol.explanation,
+      validation: {
+        timing: optVol.hasSignal
+          ? `Snapshot taken after market close. ${d.daysOfHistory} day(s) of baseline history.`
+          : `${d.daysAvailable ?? 0}/${d.daysNeeded ?? 5} days of history collected so far.`,
+        scaleVsSalary: 'Not applicable to options volume.',
+        trackRecord: 'No data available — requires logging past volume spikes vs. subsequent price moves.',
+        corroboration: optVol.hasSignal && d.volumeScore >= 70 && d.skewScore >= 70
+          ? 'Both volume and call/put skew are elevated together — mutually reinforcing.'
+          : 'No corroborating signal within options data alone.'
+      },
+      freshness: {
+        lastChecked: d.lastChecked || null,
+        schedule: 'Updates automatically, daily (weekdays)'
+      }
+    };
+    if (optVol.hasSignal && optVol.confidenceScore > 0) activeStatuses.push(signalsById.options_volume.status);
+  } catch (err) {
+    console.error(`Options volume signal failed for ${ticker}:`, err);
+  }
+
+  // Signal: Congressional trading
+  try {
+    const congress = await getCongressTradingSignal(ticker);
+    const d = congress.detail || {};
+
+    if (congress.hasSignal && congress.confidenceScore > 0) {
+      scores.push(congress.confidenceScore);
+      plainParts.push(congress.explanation);
+    }
+
+    signalsById.congress_trading = {
+      status: !congress.hasSignal ? 'neutral'
+            : congress.confidenceScore >= 70 ? 'positive'
+            : congress.confidenceScore >= 50 ? 'neutral'
+            : 'negative',
+      headline: congress.hasSignal
+        ? `${d.buyCount} purchase(s) from ${d.distinctBuyers} member(s) of Congress`
+        : congress.label,
+      detail: congress.explanation,
+      validation: {
+        timing: d.timingScore != null
+          ? `Timing sub-score ${d.timingScore}. STOCK Act disclosures can lag up to 45 days behind the trade.`
+          : 'No purchase activity to time.',
+        scaleVsSalary: 'Not applicable to congressional trading.',
+        trackRecord: 'No data available — requires accumulated history of past purchases vs. subsequent price moves.',
+        corroboration: d.distinctBuyers > 1
+          ? `${d.distinctBuyers} distinct members of Congress bought — corroborated.`
+          : d.distinctBuyers === 1
+          ? 'Only one member bought — no corroboration from others yet.'
+          : `${d.sellCount ?? 0} sale(s)/exchange(s) on file — not counted as corroboration.`
+      },
+      freshness: {
+        lastChecked: d.lastChecked || null,
+        schedule: 'Updates automatically, daily'
+      }
+    };
+    if (congress.hasSignal && congress.confidenceScore > 0) activeStatuses.push(signalsById.congress_trading.status);
+  } catch (err) {
+    console.error(`Congressional trading signal failed for ${ticker}:`, err);
+  }
+
+  // Signal 2: Analyst ratings
+  const analyst = getAnalystSignal(stockData.recommendations);
+  if (analyst) {
+    scores.push(analyst.score);
+    signalsById.analyst_rating = analyst;
+    plainParts.push(`Analyst consensus: ${analyst.headline}.`);
+    activeStatuses.push(analyst.status);
+  }
+
+  return { signalsById, scores, plainParts, activeStatuses };
+}
+
+const SIGNAL_ORDER = [
+  { id: 'insider_buying',       label: 'Insider Buying',        source: 'SEC EDGAR (Form 4)' },
+  { id: 'institutional_buying', label: 'Institutional Buying',  source: 'SEC EDGAR (13F)' },
+  { id: 'earnings_whisper',     label: 'Earnings Whisper',      source: null },
+  { id: 'short_interest',       label: 'Short Interest',        source: 'FINRA (via Nasdaq)' },
+  { id: 'analyst_rating',       label: 'Analyst Rating Change', source: 'Finnhub' },
+  { id: 'options_volume',       label: 'Options Call Volume',   source: 'Yahoo Finance' },
+  { id: 'congress_trading',     label: 'Congressional Trading', source: 'Quiver Quantitative' }
+];
+
+function normalize(meta, raw) {
+  const v = (raw && raw.validation) || {};
+  const f = (raw && raw.freshness) || {};
+  return {
+    id: meta.id,
+    label: meta.label,
+    source: meta.source || null,
+    status: (raw && raw.status) || 'neutral',
+    headline: (raw && raw.headline) || 'No signal detected',
+    detail: (raw && raw.detail) || '',
+    validation: {
+      timing:        v.timing        || 'No data available',
+      scaleVsSalary: v.scaleVsSalary || 'No data available',
+      trackRecord:   v.trackRecord   || 'No data available',
+      corroboration: v.corroboration || 'No data available'
+    },
+    freshness: {
+      lastChecked: f.lastChecked || null,
+      schedule: f.schedule || 'No schedule data available'
+    }
+  };
+}
+
 const app = express();
 app.use(express.json());
 app.use(cors());
@@ -367,23 +633,13 @@ app.get('/api/briefing/latest', async (req, res) => {
       data.stocks.map(stock => getStockData(stock.ticker))
     );
 
-   // Attach conviction score to each stock
+   // Attach conviction score to each stock — same signal set as /api/ticker/:ticker
     for (const stock of stocksData) {
-      const scores = [];
+      const { scores, plainParts } = await computeAllSignals(stock.ticker, stock);
 
-      try {
-        const inst = await getInstitutionalBuyingSignal(stock.ticker);
-        if (inst && inst.confidenceScore > 0) scores.push(inst.confidenceScore);
-        stock.explanation = inst?.explanation ?? 'No signal data available';
-      } catch (err) {
-        console.error(`Institutional signal failed for ${stock.ticker}:`, err);
-        stock.explanation = 'Score unavailable';
-      }
-
-      const analyst = getAnalystSignal(stock.recommendations);
-      if (analyst) scores.push(analyst.score);
-
+      stock.explanation = plainParts.length ? plainParts.join(' ') : 'No signal data available';
       stock.activeSignals = scores.length;
+      stock.totalSignals = SIGNAL_ORDER.length;
       stock.convictionScore = scores.length
         ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
         : 0;
@@ -414,217 +670,10 @@ app.get('/api/ticker/:ticker', async (req, res) => {
     return res.status(404).json({ error: 'Ticker not tracked', ticker });
   }
 
-  const SIGNAL_ORDER = [
-    { id: 'insider_buying',       label: 'Insider Buying' },
-    { id: 'institutional_buying', label: 'Institutional Buying' },
-    { id: 'earnings_whisper',     label: 'Earnings Whisper' },
-    { id: 'short_interest',       label: 'Short Interest' },
-    { id: 'analyst_rating',       label: 'Analyst Rating Change' },
-    { id: 'options_volume',       label: 'Options Call Volume' }
-  ];
-
-  function normalize(meta, raw) {
-    const v = (raw && raw.validation) || {};
-    const f = (raw && raw.freshness) || {};
-    return {
-      id: meta.id,
-      label: meta.label,
-      status: (raw && raw.status) || 'neutral',
-      headline: (raw && raw.headline) || 'No signal detected',
-      detail: (raw && raw.detail) || '',
-      validation: {
-        timing:        v.timing        || 'No data available',
-        scaleVsSalary: v.scaleVsSalary || 'No data available',
-        trackRecord:   v.trackRecord   || 'No data available',
-        corroboration: v.corroboration || 'No data available'
-      },
-      freshness: {
-        lastChecked: f.lastChecked || null,
-        schedule: f.schedule || 'No schedule data available'
-      }
-    };
-  }
-
   try {
-    const signalsById = {};
-    const scores = [];
-    const plainParts = [];
-    const activeStatuses = [];
-    // Signal 0: Insider buying (Form 4)
-    try {
-      const insider = await getInsiderBuyingSignal(ticker);
-
-      if (insider.hasSignal && insider.confidenceScore > 0) {
-        scores.push(insider.confidenceScore);
-        plainParts.push(insider.explanation);
-      }
-      const insiderActive = insider.hasSignal && insider.confidenceScore > 0;
-
-      const d = insider.detail || {};
-
-      signalsById.insider_buying = {
-        status: !insider.hasSignal ? 'neutral'
-              : insider.confidenceScore >= 70 ? 'positive'
-              : insider.confidenceScore >= 50 ? 'neutral'
-              : 'negative',
-        headline: insider.hasSignal
-          ? `${d.buyCount} insider buy(s) from ${d.distinctBuyers} insider(s)`
-          : insider.label,
-        detail: insider.explanation,
-        validation: {
-          timing: d.timingScore != null
-            ? `Timing sub-score ${d.timingScore}. Form 4s are filed within 2 business days of the transaction.`
-            : 'No buy activity to time.',
-          scaleVsSalary: insider.hasSignal
-            ? `Average scale-vs-salary sub-score ${Math.round(d.avgScale ?? 0)}/100 across ${d.buyCount} buy(s).`
-            : 'No buy activity to compare against compensation.',
-          trackRecord: 'No data available — requires accumulated history of past buys vs. subsequent price moves.',
-          corroboration: d.distinctBuyers > 1
-            ? `${d.distinctBuyers} distinct insiders bought — corroborated.`
-            : d.distinctBuyers === 1
-            ? 'Only one insider bought — no corroboration from others yet.'
-            : `${d.sellCount ?? 0} routine sell(s) on file — not counted as corroboration.`
-        },
-        freshness: {
-          lastChecked: d.lastChecked,
-          schedule: 'Updates automatically, daily'
-        }
-      };
-      if (insiderActive) activeStatuses.push(signalsById.insider_buying.status);
-    } catch (err) {
-      console.error(`Insider signal failed for ${ticker}:`, err);
-    }
-
-    // Signal 1: Institutional buying
-    try {
-      const signal = await getInstitutionalBuyingSignal(ticker);
-      const instScore = signal?.confidenceScore ?? 0;
-      const d = signal?.detail || {};
-
-      if (instScore > 0) {
-        scores.push(instScore);
-        plainParts.push(signal.explanation);
-      }
-
-      signalsById.institutional_buying = {
-        status: instScore >= 70 ? 'positive' : instScore >= 50 ? 'neutral' : 'negative',
-        headline: d.holderCount
-          ? `${d.holderCount.toLocaleString()} institutional holder(s) on file`
-          : 'No institutional holdings on file',
-        detail: signal?.explanation || '',
-        validation: {
-          timing: `Timing sub-score ${d.timingScore ?? 'n/a'}. 13F filings lag up to 45 days.`,
-          scaleVsSalary: 'Not applicable to institutional filings.',
-          trackRecord: `Track record sub-score ${d.trackRecordScore ?? 'n/a'}.`,
-          corroboration: d.holderCount > 1
-            ? `${d.holderCount} funds hold a position.`
-            : 'Single holder — no corroboration.'
-        },
-        freshness: {
-          lastChecked: d.period || null,
-          schedule: 'Updates weekly automatically. Full quarterly sweep is manual — run it mid-to-late Aug, Nov, Feb, or May.'
-        }
-      };
-   } catch (err) {
-      console.error(`Institutional signal failed for ${ticker}:`, err);
-    }
-
-    // Signal: Short interest
-    try {
-      const shortInt = await getShortInterestSignal(ticker);
-      const d = shortInt.detail || {};
-
-      if (shortInt.hasSignal && shortInt.confidenceScore > 0) {
-        // Convert strength+direction into a bullish-oriented contribution:
-        // falling short interest (shorts covering) leans bullish;
-        // rising short interest leans bearish absent a confirmed squeeze.
-        const bullishContribution = shortInt.direction === 'decreasing'
-          ? shortInt.confidenceScore
-          : shortInt.direction === 'increasing'
-          ? 100 - shortInt.confidenceScore
-          : 50;
-
-        scores.push(bullishContribution);
-        plainParts.push(shortInt.explanation);
-      }
-
-      signalsById.short_interest = {
-        status: !shortInt.hasSignal ? 'neutral'
-              : shortInt.direction === 'decreasing' ? 'positive'
-              : shortInt.direction === 'increasing' ? 'negative'
-              : 'neutral',
-        headline: shortInt.hasSignal
-          ? `Short interest ${shortInt.direction} as of ${d.settlementDate}`
-          : shortInt.label,
-        detail: shortInt.explanation,
-        validation: {
-          timing: d.settlementDate
-            ? `Settlement date ${d.settlementDate}. FINRA short interest is published twice monthly.`
-            : 'No settlement data available.',
-          scaleVsSalary: 'Not applicable to short interest.',
-          trackRecord: 'No data available — requires logging past short interest moves vs. subsequent price outcomes.',
-         corroboration: d.trendScore >= 80
-            ? shortInt.explanation.match(/consistent .*?trend/)?.[0] || 'Consistent multi-period trend.'
-            : 'No confirmed multi-period trend yet.'
-        },
-        freshness: {
-          lastChecked: d.settlementDate || null,
-          schedule: 'Updates twice monthly (matches FINRA settlement dates)'
-        }
-      };
-      if (shortInt.hasSignal && shortInt.confidenceScore > 0) activeStatuses.push(signalsById.short_interest.status);
-    } catch (err) {
-      console.error(`Short interest signal failed for ${ticker}:`, err);
-    }
-
-    // Signal: Options call volume
-    try {
-      const optVol = await getOptionsVolumeSignal(ticker);
-      const d = optVol.detail || {};
-
-      if (optVol.hasSignal && optVol.confidenceScore > 0) {
-        scores.push(optVol.confidenceScore);
-        plainParts.push(optVol.explanation);
-      }
-
-      signalsById.options_volume = {
-        status: !optVol.hasSignal ? 'neutral'
-              : optVol.confidenceScore >= 70 ? 'positive'
-              : optVol.confidenceScore >= 50 ? 'neutral'
-              : 'negative',
-        headline: optVol.hasSignal
-          ? `${d.volumeRatio?.toFixed(1)}x average call volume, ${d.callPutRatio?.toFixed(1)}:1 call/put ratio`
-          : optVol.label,
-        detail: optVol.explanation,
-        validation: {
-          timing: optVol.hasSignal
-            ? `Snapshot taken after market close. ${d.daysOfHistory} day(s) of baseline history.`
-            : `${d.daysAvailable ?? 0}/${d.daysNeeded ?? 5} days of history collected so far.`,
-          scaleVsSalary: 'Not applicable to options volume.',
-          trackRecord: 'No data available — requires logging past volume spikes vs. subsequent price moves.',
-          corroboration: optVol.hasSignal && d.volumeScore >= 70 && d.skewScore >= 70
-            ? 'Both volume and call/put skew are elevated together — mutually reinforcing.'
-            : 'No corroborating signal within options data alone.'
-        },
-        freshness: {
-          lastChecked: d.lastChecked || null,
-          schedule: 'Updates automatically, daily (weekdays)'
-        }
-      };
-      if (optVol.hasSignal && optVol.confidenceScore > 0) activeStatuses.push(signalsById.options_volume.status);
-    } catch (err) {
-      console.error(`Options volume signal failed for ${ticker}:`, err);
-    }
-
-    // Signal 2: Analyst ratings
     const stockData = await getStockData(ticker);
-    const analyst = getAnalystSignal(stockData.recommendations);
-   if (analyst) {
-      scores.push(analyst.score);
-      signalsById.analyst_rating = analyst;
-      plainParts.push(`Analyst consensus: ${analyst.headline}.`);
-      activeStatuses.push(analyst.status);
-    }
+    const { signalsById, scores, plainParts, activeStatuses } = await computeAllSignals(ticker, stockData);
+
     const score = scores.length
       ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
       : 0;
@@ -643,6 +692,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       activeCount: scores.length,
       statuses: activeStatuses,
       priceTarget,
+      totalSignals: SIGNAL_ORDER.length,
     });
 
     const signalsSummary = plainParts.length

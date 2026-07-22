@@ -15,8 +15,8 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const anthropic = process.env.ANTHROPIC_API_KEY ? new Anthropic() : null;
 
-function classify({ activeCount, statuses }) {
-  const total = 6;
+function classify({ activeCount, statuses, totalSignals }) {
+  const total = totalSignals;
   const positiveCount = statuses.filter(s => s === 'positive').length;
   const negativeCount = statuses.filter(s => s === 'negative').length;
   const disagrees = positiveCount > 0 && negativeCount > 0;
@@ -48,11 +48,11 @@ function classify({ activeCount, statuses }) {
   return { badge, headline, reasoning, positiveCount, negativeCount, disagrees };
 }
 
-async function rewriteReasoning({ badge, headline, activeCount, positiveCount, negativeCount, priceTarget, fallback }) {
+async function rewriteReasoning({ badge, headline, activeCount, totalSignals, positiveCount, negativeCount, priceTarget, fallback }) {
   const facts = {
     classification: badge,
     activeSignals: activeCount,
-    totalSignals: 6,
+    totalSignals,
     bullishSignals: positiveCount,
     bearishSignals: negativeCount,
     priceTarget: priceTarget?.available
@@ -81,7 +81,7 @@ async function rewriteReasoning({ badge, headline, activeCount, positiveCount, n
   return text || fallback;
 }
 
-async function getVerdict({ activeCount, statuses, priceTarget }) {
+async function getVerdict({ activeCount, statuses, priceTarget, totalSignals }) {
   const priceTargetAvailable = !!priceTarget?.available;
   let priceTargetSentence = '';
   if (priceTargetAvailable) {
@@ -89,7 +89,7 @@ async function getVerdict({ activeCount, statuses, priceTarget }) {
     priceTargetSentence = ` Combined with a ${Math.abs(priceTarget.upsidePct).toFixed(1)}% ${direction} to the average analyst price target ($${priceTarget.mean.toFixed(2)} from ${priceTarget.numAnalysts} analysts), this adds context to the picture above.`;
   }
 
-  const { badge, headline, reasoning, positiveCount, negativeCount } = classify({ activeCount, statuses });
+  const { badge, headline, reasoning, positiveCount, negativeCount } = classify({ activeCount, statuses, totalSignals });
   const fallbackReasoning = reasoning + priceTargetSentence;
 
   if (!anthropic) {
@@ -101,6 +101,7 @@ async function getVerdict({ activeCount, statuses, priceTarget }) {
       badge,
       headline,
       activeCount,
+      totalSignals,
       positiveCount,
       negativeCount,
       priceTarget,
