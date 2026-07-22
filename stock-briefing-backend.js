@@ -16,6 +16,9 @@ const { getWsbSentimentSignal } = require('./wsbSentimentScore.js');
 const { getPriceTarget } = require('./priceTargetData.js');
 const { getVerdict } = require('./noiseScore.js');
 const { explainSignalPlainly } = require('./signalExplainer.js');
+const { explainNewsForTicker } = require('./newsExplainer.js');
+const { getUpcomingEvents } = require('./upcomingEvents.js');
+const { getAiTake } = require('./aiTakeScore.js');
 
 // Scores analyst consensus 0-100 from Finnhub recommendation trends.
 function getAnalystSignal(recommendations) {
@@ -457,6 +460,7 @@ function normalize(meta, raw) {
     label: meta.label,
     source: meta.source || null,
     category: meta.category || 'Other',
+    hasData: !!(raw && raw.hasData),
     status: (raw && raw.status) || 'neutral',
     headline: (raw && raw.headline) || 'No signal detected',
     detail: (raw && raw.detail) || '',
@@ -566,33 +570,54 @@ async function getRecommendationTrends(ticker) {
   }
 }
 
+// Finnhub's calendar/earnings requires an explicit from/to range — without
+// one it silently returns an empty earningsCalendar every time, which is why
+// nextEarnings has never actually populated. Window covers the next ~2
+// quarters, which is enough to always catch the next confirmed date.
 async function getEarningsCalendar(ticker) {
   try {
+    const from = new Date().toISOString().slice(0, 10);
+    const to = new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const res = await axios.get(`https://finnhub.io/api/v1/calendar/earnings`, {
       params: {
         symbol: ticker,
+        from,
+        to,
         token: FINNHUB_KEY
       }
     });
-    return res.data;
+    const calendar = res.data?.earningsCalendar || [];
+    // Finnhub doesn't guarantee sort order — take the soonest upcoming date.
+    return [...calendar].sort((a, b) => new Date(a.date) - new Date(b.date));
   } catch (e) {
     console.error(`Error fetching earnings for ${ticker}:`, e.message);
     return null;
   }
 }
 
-async function getNews(ticker) {
+// Searching by bare ticker (e.g. "QCOM") matches unrelated noise — NewsAPI's
+// qInTitle restricted to the company's actual name is much more precise,
+// since it requires the name to appear in the headline itself, not just
+// somewhere in the article body.
+async function getNews(ticker, companyName) {
   try {
     const res = await axios.get(`https://newsapi.org/v2/everything`, {
       params: {
-        q: ticker,
+        qInTitle: companyName || ticker,
         sortBy: 'publishedAt',
         language: 'en',
         apikey: NEWS_API_KEY,
-        pageSize: 5
+        pageSize: 10
       }
     });
-    return res.data.articles || [];
+    const articles = res.data.articles || [];
+    // NewsAPI occasionally returns syndicated duplicates of the same story.
+    const seen = new Set();
+    return articles.filter(a => {
+      if (seen.has(a.title)) return false;
+      seen.add(a.title);
+      return true;
+    });
   } catch (e) {
     console.error(`Error fetching news for ${ticker}:`, e.message);
     return [];
@@ -606,7 +631,7 @@ async function getStockData(ticker) {
     const profile = await getCompanyProfile(ticker);
     const recommendations = await getRecommendationTrends(ticker);
     const earnings = await getEarningsCalendar(ticker);
-    const news = await getNews(ticker);
+    const news = await getNews(ticker, profile?.name);
 
     if (!quote) {
       return { ticker, error: 'Failed to fetch quote' };
@@ -633,8 +658,9 @@ async function getStockData(ticker) {
       },
       recommendations: recommendations?.[0] || null,
       nextEarnings: earnings?.[0] || null,
-      news: news.slice(0, 3).map(n => ({
+      news: news.slice(0, 5).map(n => ({
         title: n.title,
+        description: n.description || null,
         source: n.source.name,
         url: n.url,
         publishedAt: n.publishedAt
@@ -855,6 +881,26 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       ? plainParts.join(' ')
       : `No signal data available for ${ticker} yet.`;
 
+    const bottomLine = { verdict: headline, reasoning };
+
+    // News, upcoming dates, and the AI take are independent of each other
+    // and of everything above — run them concurrently rather than serially.
+    const [newsWithMeaning, upcoming, aiTake] = await Promise.all([
+      explainNewsForTicker(ticker, tracked.name, stockData.news),
+      Promise.resolve(getUpcomingEvents(stockData.nextEarnings)),
+      getAiTake({
+        ticker,
+        companyName: tracked.name,
+        quote: stockData.quote,
+        profile: stockData.profile,
+        convictionScore: score,
+        tier,
+        bottomLine,
+        plainParts,
+        priceTarget,
+      }),
+    ]);
+
     res.json({
       ticker,
       companyName: tracked.name || ticker,
@@ -867,10 +913,10 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       activeSignals: scores.length,
       signalQuality: { badge, headline },
       plainEnglish: signalsSummary,
-      bottomLine: {
-        verdict: headline,
-        reasoning
-      },
+      bottomLine,
+      news: newsWithMeaning,
+      upcoming,
+      aiTake,
       signals: SIGNAL_ORDER.map(m => normalize(m, signalsById[m.id]))
     });
   } catch (error) {
