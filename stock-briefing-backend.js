@@ -19,6 +19,7 @@ const { explainSignalPlainly } = require('./signalExplainer.js');
 const { explainNewsForTicker } = require('./newsExplainer.js');
 const { getUpcomingEvents } = require('./upcomingEvents.js');
 const { getAiTake } = require('./aiTakeScore.js');
+const { applyPositionAwareAdvice } = require('./positionAdvice.js');
 
 // Scores analyst consensus 0-100 from Finnhub recommendation trends.
 function getAnalystSignal(recommendations) {
@@ -805,6 +806,38 @@ app.delete('/api/stocks/:ticker', (req, res) => {
   res.json(data.stocks);
 });
 
+// Phase 6 — cost basis / position tracking, stored in data.json alongside
+// the tracked stock list (personal portfolio data, not market data).
+app.put('/api/stocks/:ticker/position', (req, res) => {
+  const ticker = req.params.ticker.toUpperCase();
+  const stock = data.stocks.find(s => s.ticker === ticker);
+  if (!stock) return res.status(404).json({ error: 'Ticker not tracked', ticker });
+
+  const costPerShare = Number(req.body.costPerShare);
+  const shares = Number(req.body.shares);
+
+  if (!Number.isFinite(costPerShare) || costPerShare <= 0) {
+    return res.status(400).json({ error: 'costPerShare must be a positive number' });
+  }
+  if (!Number.isFinite(shares) || shares <= 0) {
+    return res.status(400).json({ error: 'shares must be a positive number' });
+  }
+
+  stock.position = { costPerShare, shares, updatedAt: new Date().toISOString() };
+  saveData(data);
+  res.json(stock);
+});
+
+app.delete('/api/stocks/:ticker/position', (req, res) => {
+  const ticker = req.params.ticker.toUpperCase();
+  const stock = data.stocks.find(s => s.ticker === ticker);
+  if (!stock) return res.status(404).json({ error: 'Ticker not tracked', ticker });
+
+  delete stock.position;
+  saveData(data);
+  res.json(stock);
+});
+
 app.get('/api/briefings', (req, res) => {
   res.json(data.briefings.slice(-10));
 });
@@ -860,8 +893,17 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
       : 0;
 
-    const tier = score >= 70 ? 'High' : score >= 50 ? 'Moderate' : 'Low';
-    const action = score >= 70 ? 'BUY' : score >= 50 ? 'HOLD' : 'SELL';
+    const rawTier = score >= 70 ? 'High' : score >= 50 ? 'Moderate' : 'Low';
+    const rawAction = score >= 70 ? 'BUY' : score >= 50 ? 'HOLD' : 'SELL';
+
+    const positionAdvice = applyPositionAwareAdvice({
+      score,
+      tier: rawTier,
+      action: rawAction,
+      currentPrice: stockData.quote.price,
+      position: tracked.position || null,
+    });
+    const { tier, action } = positionAdvice;
 
     let priceTarget = null;
     try {
@@ -917,6 +959,8 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       news: newsWithMeaning,
       upcoming,
       aiTake,
+      position: tracked.position || null,
+      positionAdvice,
       signals: SIGNAL_ORDER.map(m => normalize(m, signalsById[m.id]))
     });
   } catch (error) {
