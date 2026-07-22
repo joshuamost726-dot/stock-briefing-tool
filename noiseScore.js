@@ -5,20 +5,23 @@
  * target into one plain-English read: is this genuine conviction worth
  * acting on, or noise/incomplete evidence to wait out?
  *
- * Does NOT re-derive signal content itself — takes the already-assembled
- * plain-English signal summary (plainParts.join(' ')) and price target data,
- * and wraps them with a headline verdict + closing reasoning sentence.
+ * badge/headline are classification, not prose — kept fully rule-based so
+ * they stay deterministic and auditable (other code keys off exact headline
+ * strings). Only the `reasoning` paragraph is optionally rewritten by Claude
+ * for better prose; the rule-based sentence is always computed first and
+ * used verbatim if ANTHROPIC_API_KEY isn't set or the API call fails.
  */
 
-function getVerdict({ activeCount, statuses, priceTarget }) {
+const Anthropic = require('@anthropic-ai/sdk');
+const anthropic = process.env.ANTHROPIC_API_KEY ? new Anthropic() : null;
+
+function classify({ activeCount, statuses }) {
   const total = 6;
   const positiveCount = statuses.filter(s => s === 'positive').length;
   const negativeCount = statuses.filter(s => s === 'negative').length;
   const disagrees = positiveCount > 0 && negativeCount > 0;
 
-  let headline;
-  let reasoning;
-  let badge;
+  let badge, headline, reasoning;
 
   if (activeCount === 0) {
     badge = 'No Data';
@@ -42,13 +45,72 @@ function getVerdict({ activeCount, statuses, priceTarget }) {
     reasoning = `${activeCount} of ${total} signals are active and generally agree. There's a real, if incomplete, case here — but half the picture is still missing, so this isn't strong enough to act on aggressively yet.`;
   }
 
+  return { badge, headline, reasoning, positiveCount, negativeCount, disagrees };
+}
+
+async function rewriteReasoning({ badge, headline, activeCount, positiveCount, negativeCount, priceTarget, fallback }) {
+  const facts = {
+    classification: badge,
+    activeSignals: activeCount,
+    totalSignals: 6,
+    bullishSignals: positiveCount,
+    bearishSignals: negativeCount,
+    priceTarget: priceTarget?.available
+      ? {
+          upsidePct: Number(priceTarget.upsidePct.toFixed(1)),
+          meanTarget: priceTarget.mean,
+          numAnalysts: priceTarget.numAnalysts,
+        }
+      : null,
+  };
+
+  const message = await anthropic.messages.create({
+    model: 'claude-haiku-4-5',
+    max_tokens: 200,
+    system:
+      'You write one short paragraph (2-4 sentences) explaining a stock conviction ' +
+      'verdict to a retail investor, given only these structured facts — do not add ' +
+      'facts not present in the input. Match this voice: plain, direct, conservative ' +
+      "about what the evidence supports, willing to say \"this isn't enough to act on\" " +
+      'when true. No hedging filler, no "as an AI", no bullet points — prose only. ' +
+      'The classification field is fixed and must not be contradicted, only explained.',
+    messages: [{ role: 'user', content: JSON.stringify(facts) }],
+  });
+
+  const text = message.content.find(b => b.type === 'text')?.text?.trim();
+  return text || fallback;
+}
+
+async function getVerdict({ activeCount, statuses, priceTarget }) {
+  const priceTargetAvailable = !!priceTarget?.available;
   let priceTargetSentence = '';
-  if (priceTarget?.available) {
+  if (priceTargetAvailable) {
     const direction = priceTarget.upsidePct >= 0 ? 'upside' : 'downside';
     priceTargetSentence = ` Combined with a ${Math.abs(priceTarget.upsidePct).toFixed(1)}% ${direction} to the average analyst price target ($${priceTarget.mean.toFixed(2)} from ${priceTarget.numAnalysts} analysts), this adds context to the picture above.`;
   }
 
-  return { badge, headline, reasoning, priceTargetSentence };
+  const { badge, headline, reasoning, positiveCount, negativeCount } = classify({ activeCount, statuses });
+  const fallbackReasoning = reasoning + priceTargetSentence;
+
+  if (!anthropic) {
+    return { badge, headline, reasoning: fallbackReasoning };
+  }
+
+  try {
+    const rewritten = await rewriteReasoning({
+      badge,
+      headline,
+      activeCount,
+      positiveCount,
+      negativeCount,
+      priceTarget,
+      fallback: fallbackReasoning,
+    });
+    return { badge, headline, reasoning: rewritten };
+  } catch (err) {
+    console.error('Claude verdict rewrite failed, using rule-based reasoning:', err);
+    return { badge, headline, reasoning: fallbackReasoning };
+  }
 }
 
 module.exports = { getVerdict };

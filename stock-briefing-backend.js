@@ -639,7 +639,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       console.error(`Price target lookup failed for ${ticker}:`, err);
     }
 
-    const { badge, headline, reasoning, priceTargetSentence } = getVerdict({
+    const { badge, headline, reasoning } = await getVerdict({
       activeCount: scores.length,
       statuses: activeStatuses,
       priceTarget,
@@ -663,7 +663,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       plainEnglish: signalsSummary,
       bottomLine: {
         verdict: headline,
-        reasoning: `${priceTargetSentence.trim() ? priceTargetSentence.trim() + ' ' : ''}${reasoning}`
+        reasoning
       },
       signals: SIGNAL_ORDER.map(m => normalize(m, signalsById[m.id]))
     });
