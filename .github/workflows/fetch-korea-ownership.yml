@@ -1,0 +1,29 @@
+name: Fetch Korea Ownership Changes
+
+on:
+  schedule:
+    # 11pm UTC = 8am KST, every day — after Korean market disclosures for
+    # the day would typically be filed.
+    - cron: '0 23 * * *'
+  workflow_dispatch:
+
+jobs:
+  fetch-korea-ownership:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Korea ownership fetch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENDART_API_KEY: ${{ secrets.OPENDART_API_KEY }}
+        run: python fetch_korea_ownership.py

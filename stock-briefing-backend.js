@@ -13,6 +13,7 @@ const { getCongressTradingSignal } = require('./congressTradingScore.js');
 const { getGovContractsSignal } = require('./govContractsScore.js');
 const { getOffExchangeSignal } = require('./offExchangeScore.js');
 const { getWsbSentimentSignal } = require('./wsbSentimentScore.js');
+const { getKoreaOwnershipSignal } = require('./koreaOwnershipScore.js');
 const { getPriceTarget } = require('./priceTargetData.js');
 const { getVerdict } = require('./noiseScore.js');
 const { explainSignalPlainly } = require('./signalExplainer.js');
@@ -440,6 +441,52 @@ async function computeAllSignals(ticker, stockData, position = null) {
   }
   })());
 
+  // Signal: Korea ownership changes (SKHY only — its Form 4/insider-buying
+  // equivalent, since it's a genuine foreign private issuer with no US
+  // insider disclosure at all)
+  signalPromises.push((async () => {
+  try {
+    const korea = await getKoreaOwnershipSignal(ticker);
+    const d = korea.detail || {};
+
+    if (korea.hasSignal && korea.confidenceScore > 0) {
+      scores.push(korea.confidenceScore);
+      plainParts.push(korea.explanation);
+    }
+
+    signalsById.korea_ownership = {
+      hasData: korea.hasSignal,
+      status: !korea.hasSignal ? 'neutral'
+            : korea.confidenceScore >= 70 ? 'positive'
+            : korea.confidenceScore >= 50 ? 'neutral'
+            : 'negative',
+      headline: korea.hasSignal
+        ? `${d.increaseCount} ownership increase(s) from ${d.distinctReporters} reporter(s)`
+        : korea.label,
+      detail: korea.explanation,
+      validation: {
+        timing: d.timingScore != null
+          ? `Timing sub-score ${d.timingScore}.`
+          : 'No increase activity to time.',
+        scaleVsSalary: 'Not applicable — Korean disclosure reports no compensation data here.',
+        trackRecord: 'No data available — requires accumulated history of past increases vs. subsequent price moves.',
+        corroboration: d.distinctReporters > 1
+          ? `${d.distinctReporters} distinct reporters increased holdings — corroborated.`
+          : d.distinctReporters === 1
+          ? 'Only one reporter increased holdings — no corroboration from others yet.'
+          : `${d.decreaseCount ?? 0} decrease(s) on file — not counted as corroboration.`
+      },
+      freshness: {
+        lastChecked: d.lastChecked || null,
+        schedule: 'Updates automatically, daily'
+      }
+    };
+    if (korea.hasSignal && korea.confidenceScore > 0) activeStatuses.push(signalsById.korea_ownership.status);
+  } catch (err) {
+    console.error(`Korea ownership signal failed for ${ticker}:`, err);
+  }
+  })());
+
   await Promise.all(signalPromises);
 
   // Signal 2: Analyst ratings
@@ -479,6 +526,7 @@ async function explainSignalsPlainly(signalsById) {
 const SIGNAL_ORDER = [
   { id: 'insider_buying',       label: 'Insider Buying',        source: 'SEC EDGAR (Form 4)',    category: 'Company Filings' },
   { id: 'institutional_buying', label: 'Institutional Buying',  source: 'SEC EDGAR (13F)',       category: 'Company Filings' },
+  { id: 'korea_ownership',      label: 'Korea Ownership Change', source: 'Open DART (Korea FSS)', category: 'Company Filings' },
   { id: 'earnings_whisper',     label: 'Earnings Whisper',      source: null,                    category: 'Analyst & Estimates' },
   { id: 'analyst_rating',       label: 'Analyst Rating Change', source: 'Finnhub',               category: 'Analyst & Estimates' },
   { id: 'short_interest',       label: 'Short Interest',        source: 'FINRA (via Nasdaq)',    category: 'Market Activity' },
