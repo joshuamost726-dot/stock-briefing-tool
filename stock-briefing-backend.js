@@ -16,6 +16,7 @@ const { getWsbSentimentSignal } = require('./wsbSentimentScore.js');
 const { getKoreaOwnershipSignal } = require('./koreaOwnershipScore.js');
 const { getKoreaMajorShareholderSignal } = require('./koreaMajorShareholderScore.js');
 const { getKoreaCapitalActionsSignal } = require('./koreaCapitalActionsScore.js');
+const { getTechnicalSignal } = require('./technicalScore.js');
 const { getPriceTarget } = require('./priceTargetData.js');
 const { getVerdict } = require('./noiseScore.js');
 const { explainSignalPlainly } = require('./signalExplainer.js');
@@ -589,6 +590,58 @@ async function computeAllSignals(ticker, stockData, position = null) {
   }
   })());
 
+  // Signal: Technical momentum — the one signal that applies to every
+  // tracked ticker equally, since it doesn't depend on any country's
+  // disclosure regime at all.
+  signalPromises.push((async () => {
+  try {
+    const tech = await getTechnicalSignal(ticker);
+    const d = tech.detail || {};
+
+    if (tech.hasSignal && tech.confidenceScore > 0) {
+      // Bidirectional like short_interest/off_exchange — bearish trend
+      // leans bearish, bullish trend leans bullish.
+      const bullishContribution = tech.direction === 'bullish'
+        ? tech.confidenceScore
+        : tech.direction === 'bearish'
+        ? 100 - tech.confidenceScore
+        : 50;
+
+      scores.push(bullishContribution);
+      plainParts.push(tech.explanation);
+    }
+
+    signalsById.technical_momentum = {
+      hasData: tech.hasSignal,
+      status: !tech.hasSignal ? 'neutral'
+            : tech.direction === 'bullish' ? 'positive'
+            : tech.direction === 'bearish' ? 'negative'
+            : 'neutral',
+      headline: tech.hasSignal
+        ? `${tech.label} — ${d.rangePosition != null ? d.rangePosition.toFixed(0) : '?'}% of 52-week range`
+        : tech.label,
+      detail: tech.explanation,
+      validation: {
+        timing: d.lastChecked
+          ? `Snapshot as of ${d.lastChecked}. Price history updates daily (weekdays).`
+          : `${d.daysAvailable ?? 0}/${d.daysNeeded ?? 200} days of history collected so far.`,
+        scaleVsSalary: 'Not applicable to technical price/volume data.',
+        trackRecord: 'No data available — requires logging past trend signals vs. subsequent price moves.',
+        corroboration: tech.hasSignal && d.volumeConfirmationScore >= 70
+          ? 'Volume confirms the price trend — mutually reinforcing.'
+          : 'No strong volume confirmation for this trend.'
+      },
+      freshness: {
+        lastChecked: d.lastChecked || null,
+        schedule: 'Updates automatically, daily (weekdays)'
+      }
+    };
+    if (tech.hasSignal && tech.confidenceScore > 0) activeStatuses.push(signalsById.technical_momentum.status);
+  } catch (err) {
+    console.error(`Technical signal failed for ${ticker}:`, err);
+  }
+  })());
+
   await Promise.all(signalPromises);
 
   // Signal 2: Analyst ratings
@@ -636,6 +689,7 @@ const SIGNAL_ORDER = [
   { id: 'short_interest',       label: 'Short Interest',        source: 'FINRA (via Nasdaq)',    category: 'Market Activity' },
   { id: 'options_volume',       label: 'Options Call Volume',   source: 'Yahoo Finance',         category: 'Market Activity' },
   { id: 'off_exchange',        label: 'Off-Exchange Volume',   source: 'Quiver Quantitative',   category: 'Market Activity' },
+  { id: 'technical_momentum',  label: 'Technical Momentum',    source: 'Yahoo Finance',         category: 'Market Activity' },
   { id: 'congress_trading',     label: 'Congressional Trading', source: 'Quiver Quantitative',   category: 'Government & Political' },
   { id: 'gov_contracts',        label: 'Government Contracts',  source: 'Quiver Quantitative',   category: 'Government & Political' },
   { id: 'wsb_sentiment',        label: 'Reddit / WSB Attention', source: 'ApeWisdom',            category: 'Retail Sentiment' }
