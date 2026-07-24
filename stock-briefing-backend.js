@@ -14,6 +14,7 @@ const { getGovContractsSignal } = require('./govContractsScore.js');
 const { getOffExchangeSignal } = require('./offExchangeScore.js');
 const { getWsbSentimentSignal } = require('./wsbSentimentScore.js');
 const { getKoreaOwnershipSignal } = require('./koreaOwnershipScore.js');
+const { getKoreaMajorShareholderSignal } = require('./koreaMajorShareholderScore.js');
 const { getPriceTarget } = require('./priceTargetData.js');
 const { getVerdict } = require('./noiseScore.js');
 const { explainSignalPlainly } = require('./signalExplainer.js');
@@ -487,6 +488,58 @@ async function computeAllSignals(ticker, stockData, position = null) {
   }
   })());
 
+  // Signal: Korea major shareholder changes (SKHY only — its institutional-
+  // buying equivalent, since it's a genuine foreign private issuer with no
+  // US 13F coverage of its own)
+  signalPromises.push((async () => {
+  try {
+    const koreaInst = await getKoreaMajorShareholderSignal(ticker);
+    const d = koreaInst.detail || {};
+
+    if (koreaInst.hasSignal && koreaInst.confidenceScore > 0) {
+      // Bidirectional like short_interest/off_exchange — decreasing stakes
+      // lean bearish, increasing stakes lean bullish, mixed stays neutral.
+      const bullishContribution = koreaInst.direction === 'increasing'
+        ? koreaInst.confidenceScore
+        : koreaInst.direction === 'decreasing'
+        ? 100 - koreaInst.confidenceScore
+        : 50;
+
+      scores.push(bullishContribution);
+      plainParts.push(koreaInst.explanation);
+    }
+
+    signalsById.korea_major_shareholder = {
+      hasData: koreaInst.hasSignal,
+      status: !koreaInst.hasSignal ? 'neutral'
+            : koreaInst.direction === 'increasing' ? 'positive'
+            : koreaInst.direction === 'decreasing' ? 'negative'
+            : 'neutral',
+      headline: koreaInst.hasSignal
+        ? `${d.filingCount} major shareholder filing(s), net ${koreaInst.direction}`
+        : koreaInst.label,
+      detail: koreaInst.explanation,
+      validation: {
+        timing: d.timingScore != null
+          ? `Timing sub-score ${d.timingScore}.`
+          : 'No recent filings to time.',
+        scaleVsSalary: 'Not applicable — Korean disclosure reports no compensation data here.',
+        trackRecord: 'No data available — requires accumulated history of past filings vs. subsequent price moves.',
+        corroboration: d.distinctReporters > 1
+          ? `${d.distinctReporters} distinct institutions filed — corroborated.`
+          : 'Only one institution filed — no corroboration from others yet.'
+      },
+      freshness: {
+        lastChecked: d.lastChecked || null,
+        schedule: 'Updates automatically, daily'
+      }
+    };
+    if (koreaInst.hasSignal && koreaInst.confidenceScore > 0) activeStatuses.push(signalsById.korea_major_shareholder.status);
+  } catch (err) {
+    console.error(`Korea major shareholder signal failed for ${ticker}:`, err);
+  }
+  })());
+
   await Promise.all(signalPromises);
 
   // Signal 2: Analyst ratings
@@ -527,6 +580,7 @@ const SIGNAL_ORDER = [
   { id: 'insider_buying',       label: 'Insider Buying',        source: 'SEC EDGAR (Form 4)',    category: 'Company Filings' },
   { id: 'institutional_buying', label: 'Institutional Buying',  source: 'SEC EDGAR (13F)',       category: 'Company Filings' },
   { id: 'korea_ownership',      label: 'Korea Ownership Change', source: 'Open DART (Korea FSS)', category: 'Company Filings' },
+  { id: 'korea_major_shareholder', label: 'Korea Major Shareholder', source: 'Open DART (Korea FSS)', category: 'Company Filings' },
   { id: 'earnings_whisper',     label: 'Earnings Whisper',      source: null,                    category: 'Analyst & Estimates' },
   { id: 'analyst_rating',       label: 'Analyst Rating Change', source: 'Finnhub',               category: 'Analyst & Estimates' },
   { id: 'short_interest',       label: 'Short Interest',        source: 'FINRA (via Nasdaq)',    category: 'Market Activity' },

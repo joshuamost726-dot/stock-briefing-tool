@@ -22,8 +22,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run Korea ownership fetch
+      - name: Run Korea executive ownership fetch
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OPENDART_API_KEY: ${{ secrets.OPENDART_API_KEY }}
         run: python fetch_korea_ownership.py
+
+      - name: Run Korea major shareholder fetch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENDART_API_KEY: ${{ secrets.OPENDART_API_KEY }}
+        run: python fetch_korea_major_shareholders.py
