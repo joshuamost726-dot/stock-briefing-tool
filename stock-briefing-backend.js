@@ -591,6 +591,43 @@ const SIGNAL_ORDER = [
   { id: 'wsb_sentiment',        label: 'Reddit / WSB Attention', source: 'ApeWisdom',            category: 'Retail Sentiment' }
 ];
 
+// Signals that are structurally impossible for a given ticker — not just
+// currently empty, but confirmed (via direct testing, see TASKS.md) to have
+// no path to ever populating — get filtered out of that ticker's signal
+// list and total count entirely, rather than sitting forever as dead "No
+// Data" cards. Deliberately conservative: a signal only goes here once
+// there's real evidence it can never work (e.g. an API confirming "no such
+// symbol"), not just because it's currently unpopulated — institutional_buying
+// stays for SKHY/CWBHF despite being thin right now, since more holders
+// could genuinely show up in a future 13F sweep. off_exchange stays for
+// CWBHF too — it returned a Quiver server error, not a confirmed empty
+// result, so it might just be a temporary bug on Quiver's end.
+const INAPPLICABLE_SIGNALS_BY_TICKER = {
+  // SKHY: genuine foreign private issuer (Korea Exchange primary listing,
+  // OTC-only in the US) — no Form 4 (Section 16 exempt), no FINRA short
+  // interest ("not available" per Nasdaq's own API), no US options market,
+  // and Quiver's congressional trading/gov contracts/off-exchange all
+  // returned confirmed-empty (not error) results.
+  SKHY: ['insider_buying', 'short_interest', 'options_volume', 'off_exchange', 'congress_trading', 'gov_contracts'],
+  // CWBHF: thinly-traded OTC penny stock — no FINRA short interest
+  // ("Symbol not exists" per Nasdaq's API), no meaningful US options
+  // market, and Quiver's congressional trading/gov contracts both
+  // returned confirmed-empty results.
+  CWBHF: ['short_interest', 'options_volume', 'congress_trading', 'gov_contracts'],
+};
+
+// Korea DART signals are structurally inapplicable to every ticker except
+// SKHY — there's no Korean disclosure regime to look up for a US company.
+const KOREA_ONLY_SIGNALS = ['korea_ownership', 'korea_major_shareholder'];
+
+function getApplicableSignalOrder(ticker) {
+  const inapplicable = new Set([
+    ...(INAPPLICABLE_SIGNALS_BY_TICKER[ticker] || []),
+    ...(ticker === 'SKHY' ? [] : KOREA_ONLY_SIGNALS),
+  ]);
+  return SIGNAL_ORDER.filter(m => !inapplicable.has(m.id));
+}
+
 function normalize(meta, raw) {
   const v = (raw && raw.validation) || {};
   const f = (raw && raw.freshness) || {};
@@ -1008,7 +1045,7 @@ app.get('/api/briefing/latest', async (req, res) => {
 
       stock.explanation = plainParts.length ? plainParts.join(' ') : 'No signal data available';
       stock.activeSignals = scores.length;
-      stock.totalSignals = SIGNAL_ORDER.length;
+      stock.totalSignals = getApplicableSignalOrder(stock.ticker).length;
       stock.convictionScore = scores.length
         ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
         : 0;
@@ -1085,7 +1122,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
         activeCount: scores.length,
         statuses: activeStatuses,
         priceTarget,
-        totalSignals: SIGNAL_ORDER.length,
+        totalSignals: getApplicableSignalOrder(ticker).length,
       }),
       explainNewsForTicker(ticker, tracked.name, stockData.news),
       Promise.resolve(getUpcomingEvents(stockData.nextEarnings)),
@@ -1128,7 +1165,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       aiTake,
       position: tracked.position || null,
       positionAdvice,
-      signals: SIGNAL_ORDER.map(m => normalize(m, signalsById[m.id]))
+      signals: getApplicableSignalOrder(ticker).map(m => normalize(m, signalsById[m.id]))
     });
   } catch (error) {
     console.error(`[ticker/${ticker}]`, error);
