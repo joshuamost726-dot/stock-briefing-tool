@@ -9,6 +9,32 @@ const { Pool } = require('pg');
 // history, portfolio value) — everything else goes through each *Score.js
 // module's own pool, matching the existing (if imperfect) per-file pattern.
 const dbPool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// SEC's free public bulk ticker->CIK lookup — used to auto-resolve a CIK
+// when a new stock is added via /api/stocks, so tracked_companies (the
+// shared source the Python fetch scripts read their ticker list from) gets
+// a working CIK without a manual SEC EDGAR lookup. Cached in memory for the
+// life of the process — this list only changes when SEC adds/removes
+// registrants, not in real time, so refetching per request would be
+// wasteful. Returns cik: null for tickers with no SEC registration at all
+// (e.g. foreign private issuers like SKHY) — that's expected, not an error.
+let secTickerCikCache = null;
+async function resolveCikForTicker(ticker) {
+  try {
+    if (!secTickerCikCache) {
+      const res = await axios.get('https://www.sec.gov/files/company_tickers.json', {
+        headers: { 'User-Agent': 'Josh Most joshuamost726@gmail.com' },
+      });
+      secTickerCikCache = Object.values(res.data);
+    }
+    const match = secTickerCikCache.find(v => v.ticker === ticker.toUpperCase());
+    if (!match) return { cik: null, secName: null };
+    return { cik: String(match.cik_str).padStart(10, '0'), secName: match.title };
+  } catch (err) {
+    console.error(`CIK lookup failed for ${ticker}:`, err.message);
+    return { cik: null, secName: null };
+  }
+}
 const { getInstitutionalBuyingSignal } = require('./convictionScore.js');
 const { getInsiderBuyingSignal } = require('./insiderScore.js');
 const { getShortInterestSignal } = require('./shortInterestScore.js');
@@ -967,18 +993,45 @@ app.get('/api/stocks', (req, res) => {
 app.post('/api/stocks', async (req, res) => {
   const { ticker, name } = req.body;
   if (!ticker) return res.status(400).json({ error: 'Ticker required' });
-  
-  const exists = data.stocks.find(s => s.ticker === ticker.toUpperCase());
+
+  const upperTicker = ticker.toUpperCase();
+  const exists = data.stocks.find(s => s.ticker === upperTicker);
   if (exists) return res.status(400).json({ error: 'Stock already tracked' });
-  
-  data.stocks.push({ ticker: ticker.toUpperCase(), name: name || ticker });
+
+  const { cik, secName } = await resolveCikForTicker(upperTicker);
+  const stockName = name || secName || ticker;
+
+  data.stocks.push({ ticker: upperTicker, name: stockName });
   saveData(data);
+
+  try {
+    await dbPool.query(
+      `INSERT INTO tracked_companies (ticker, company_name, cik)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (ticker) DO UPDATE SET company_name = EXCLUDED.company_name, cik = EXCLUDED.cik, updated_at = NOW()`,
+      [upperTicker, stockName, cik]
+    );
+  } catch (err) {
+    // data.json is still the source of truth for the website itself — a
+    // failure here means the Python fetch scripts won't pick this ticker
+    // up automatically, but it shouldn't block adding the stock at all.
+    console.error(`Failed to add ${upperTicker} to tracked_companies:`, err);
+  }
+
   res.json(data.stocks);
 });
 
-app.delete('/api/stocks/:ticker', (req, res) => {
-  data.stocks = data.stocks.filter(s => s.ticker !== req.params.ticker.toUpperCase());
+app.delete('/api/stocks/:ticker', async (req, res) => {
+  const upperTicker = req.params.ticker.toUpperCase();
+  data.stocks = data.stocks.filter(s => s.ticker !== upperTicker);
   saveData(data);
+
+  try {
+    await dbPool.query('DELETE FROM tracked_companies WHERE ticker = $1', [upperTicker]);
+  } catch (err) {
+    console.error(`Failed to remove ${upperTicker} from tracked_companies:`, err);
+  }
+
   res.json(data.stocks);
 });
 
