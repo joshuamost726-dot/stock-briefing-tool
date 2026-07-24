@@ -79,10 +79,10 @@ deploy. See `CLAUDE.md`'s data flow section.
 
 ### 4. Adding a stock
 
-Currently: add it in the Settings page (updates the tracked-stock list the website uses). **Known
-limitation:** most of the Python fetch scripts have their own hardcoded ticker lists that don't read
-from the same source yet, so a newly added stock will only get the signals that don't depend on one
-of those scripts (analyst rating, technical momentum) until that's unified.
+Add it in the Settings page. The backend auto-resolves its SEC CIK and writes it to the shared
+`tracked_companies` table, which every Python fetch script reads its ticker list from — so a newly
+added stock automatically picks up every signal that's structurally possible for it, no manual script
+edits needed.
 
 ## Cost
 
