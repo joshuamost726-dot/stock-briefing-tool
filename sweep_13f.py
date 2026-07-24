@@ -45,6 +45,10 @@ CUSIP_TO_TICKER = {
     "00217D100": "ASTS",
     "512807306": "LRCX",
     "747525103": "QCOM",
+    # CWBHF trades under two tickers (TSX: CWEB, OTCQX: CWBHF) — some 13F
+    # filers may report the TSX convention or omit Ticker entirely, so this
+    # CUSIP fallback catches those the raw "Ticker" field match would miss.
+    "16106R109": "CWBHF",
 }
 
 PROGRESS_EVERY = 500
