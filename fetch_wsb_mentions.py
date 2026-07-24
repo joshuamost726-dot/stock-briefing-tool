@@ -29,7 +29,8 @@ import psycopg2
 
 # --- Config ---------------------------------------------------------------
 
-TRACKED_TICKERS = ["RILY", "SKHY", "ASTS", "LRCX", "QCOM", "CWBHF"]
+# Used only if tracked_companies can't be reached.
+FALLBACK_TICKERS = ["RILY", "SKHY", "ASTS", "LRCX", "QCOM", "CWBHF"]
 # No exclusions here — unlike SEC/FINRA-sourced signals, Reddit chatter isn't
 # restricted to US-listed securities, so foreign listings stay in scope.
 
@@ -37,6 +38,20 @@ MAX_PAGES = 10
 REQUEST_DELAY_SECONDS = 1
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
+
+
+def get_tracked_tickers(conn):
+    """Reads the tracked ticker list from tracked_companies (same source the
+    website's Settings page writes to) instead of a hardcoded list, so a
+    stock added on the site picks up this signal automatically."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT ticker FROM tracked_companies ORDER BY ticker")
+            tickers = [row[0] for row in cur.fetchall()]
+        return tickers if tickers else FALLBACK_TICKERS
+    except Exception as e:
+        print(f"Could not read tracked_companies: {e}. Using fallback list.")
+        return FALLBACK_TICKERS
 
 
 # --- Schema ------------------------------------------------------------
@@ -148,8 +163,9 @@ def main():
 
     today = date.today()
     success_count = 0
+    tickers = get_tracked_tickers(conn)
 
-    for ticker in TRACKED_TICKERS:
+    for ticker in tickers:
         row = by_ticker.get(ticker)
         try:
             upsert_row(conn, ticker, today, row)
@@ -163,7 +179,7 @@ def main():
             conn.rollback()
 
     conn.close()
-    print(f"\nDone. {success_count}/{len(TRACKED_TICKERS)} tickers recorded.")
+    print(f"\nDone. {success_count}/{len(tickers)} tickers recorded.")
 
 
 if __name__ == "__main__":

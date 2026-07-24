@@ -30,8 +30,9 @@ from psycopg2.extras import execute_values
 
 # --- Config ---------------------------------------------------------------
 
-TRACKED_TICKERS = ["RILY", "ASTS", "LRCX", "QCOM"]
-# SKHY and CWBHF intentionally excluded — foreign filers, no US short interest
+# Used only if tracked_companies can't be reached.
+FALLBACK_TICKERS = ["RILY", "ASTS", "LRCX", "QCOM"]
+EXCLUDED_TICKERS = {"SKHY", "CWBHF"}  # foreign filers, no US short interest
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -40,6 +41,22 @@ HEADERS = {
     "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 }
+
+
+def get_tracked_tickers(conn):
+    """Reads the tracked ticker list from tracked_companies (same source the
+    website's Settings page writes to) instead of a hardcoded list, so a
+    stock added on the site picks up this signal automatically."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT ticker FROM tracked_companies ORDER BY ticker")
+            tickers = [row[0] for row in cur.fetchall()]
+        if not tickers:
+            tickers = FALLBACK_TICKERS
+    except Exception as e:
+        print(f"Could not read tracked_companies: {e}. Using fallback list.")
+        tickers = FALLBACK_TICKERS
+    return [t for t in tickers if t not in EXCLUDED_TICKERS]
 
 
 # --- Fetch -------------------------------------------------------------
@@ -122,7 +139,7 @@ def main():
     conn = psycopg2.connect(DATABASE_URL)
     total = 0
 
-    for ticker in TRACKED_TICKERS:
+    for ticker in get_tracked_tickers(conn):
         print(f"\n--- {ticker} ---")
         try:
             raw_rows = fetch_short_interest(ticker)

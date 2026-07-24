@@ -30,8 +30,9 @@ import psycopg2
 
 # --- Config ---------------------------------------------------------------
 
-TRACKED_TICKERS = ["RILY", "ASTS", "LRCX", "QCOM"]
-# SKHY and CWBHF intentionally excluded — foreign listings, no FINRA coverage
+# Used only if tracked_companies can't be reached.
+FALLBACK_TICKERS = ["RILY", "ASTS", "LRCX", "QCOM"]
+EXCLUDED_TICKERS = {"SKHY", "CWBHF"}  # foreign listings, no FINRA coverage
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 QUIVER_API_KEY = os.environ.get("QUIVER_API_KEY")
@@ -39,6 +40,22 @@ QUIVER_API_KEY = os.environ.get("QUIVER_API_KEY")
 HEADERS = {
     "accept": "application/json",
 }
+
+
+def get_tracked_tickers(conn):
+    """Reads the tracked ticker list from tracked_companies (same source the
+    website's Settings page writes to) instead of a hardcoded list, so a
+    stock added on the site picks up this signal automatically."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT ticker FROM tracked_companies ORDER BY ticker")
+            tickers = [row[0] for row in cur.fetchall()]
+        if not tickers:
+            tickers = FALLBACK_TICKERS
+    except Exception as e:
+        print(f"Could not read tracked_companies: {e}. Using fallback list.")
+        tickers = FALLBACK_TICKERS
+    return [t for t in tickers if t not in EXCLUDED_TICKERS]
 
 
 # --- Schema ------------------------------------------------------------
@@ -122,7 +139,7 @@ def main():
 
     total = 0
 
-    for ticker in TRACKED_TICKERS:
+    for ticker in get_tracked_tickers(conn):
         print(f"\n--- {ticker} ---")
         try:
             raw_rows = fetch_offexchange(ticker)

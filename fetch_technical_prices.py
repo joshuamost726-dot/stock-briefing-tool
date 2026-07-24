@@ -34,7 +34,8 @@ import psycopg2
 
 # --- Config ---------------------------------------------------------------
 
-TRACKED_TICKERS = ["RILY", "SKHY", "ASTS", "LRCX", "QCOM", "CWBHF"]
+# Used only if tracked_companies can't be reached.
+FALLBACK_TICKERS = ["RILY", "SKHY", "ASTS", "LRCX", "QCOM", "CWBHF"]
 
 # yfinance symbol to actually fetch price data from, when it differs from
 # our own ticker key (see module docstring for why SKHY needs this).
@@ -43,6 +44,21 @@ YFINANCE_SYMBOL_OVERRIDE = {
 }
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
+
+
+def get_tracked_tickers(conn):
+    """Reads the tracked ticker list from tracked_companies (same source the
+    website's Settings page writes to) instead of a hardcoded list, so a
+    stock added on the site picks up this signal automatically. No
+    exclusions — technical momentum works for every ticker."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT ticker FROM tracked_companies ORDER BY ticker")
+            tickers = [row[0] for row in cur.fetchall()]
+        return tickers if tickers else FALLBACK_TICKERS
+    except Exception as e:
+        print(f"Could not read tracked_companies: {e}. Using fallback list.")
+        return FALLBACK_TICKERS
 
 
 # --- Schema ------------------------------------------------------------
@@ -110,7 +126,7 @@ def main():
 
     total = 0
 
-    for ticker in TRACKED_TICKERS:
+    for ticker in get_tracked_tickers(conn):
         print(f"\n--- {ticker} ---")
         try:
             hist = fetch_history(ticker)

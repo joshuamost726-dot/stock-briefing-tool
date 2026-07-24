@@ -21,23 +21,33 @@ from psycopg2.extras import execute_values
 
 USER_AGENT = "Josh Most joshuamost726@gmail.com"
 
-TRACKED_CIKS = {
+# Used only if tracked_companies can't be reached.
+FALLBACK_CIKS = {
     "RILY": "0001464790",
     "ASTS": "0001780312",
     "LRCX": "0000707549",
     "QCOM": "0000804328",
-    # CWBHF (Charlotte's Web) was previously assumed to be a foreign filer
-    # with no Form 4 coverage because its primary listing is the TSX — that
-    # was wrong. It files 10-Ks/Form 4s as a genuine domestic SEC registrant
-    # (CIK below), confirmed via a real open-market insider purchase on file.
-    # SKHY (SK Hynix) is NOT added here — it's a true foreign private issuer
-    # (Korea Exchange primary listing) and is exempt from Section 16/Form 4
-    # reporting entirely; there is no US insider data to fetch for it.
     "CWBHF": "0001750155",
 }
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 HEADERS = {"User-Agent": USER_AGENT}
+
+
+def get_tracked_ciks(conn):
+    """Ticker -> CIK, read from tracked_companies (same source the website's
+    Settings page writes to) instead of a hardcoded list, so a stock added on
+    the site picks up Form 4 tracking automatically. Tickers with no CIK on
+    file (e.g. SKHY, a true foreign private issuer exempt from Section 16
+    reporting) are skipped, not an error."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT ticker, cik FROM tracked_companies WHERE cik IS NOT NULL ORDER BY ticker")
+            rows = {ticker: cik for ticker, cik in cur.fetchall()}
+        return rows if rows else FALLBACK_CIKS
+    except Exception as e:
+        print(f"Could not read tracked_companies: {e}. Using fallback list.")
+        return FALLBACK_CIKS
 
 
 def get_filing_index(cik, days_back):
@@ -185,7 +195,7 @@ def main():
     conn = psycopg2.connect(DATABASE_URL)
     total_inserted = 0
 
-    for ticker, cik in TRACKED_CIKS.items():
+    for ticker, cik in get_tracked_ciks(conn).items():
         print(f"\n--- {ticker} (CIK {cik}) ---")
         try:
             filings = get_filing_index(cik, args.backfill)

@@ -30,10 +30,27 @@ import psycopg2
 
 # --- Config ---------------------------------------------------------------
 
-TRACKED_TICKERS = ["RILY", "ASTS", "LRCX", "QCOM"]
-# SKHY and CWBHF intentionally excluded — no meaningful US options market
+# Used only if tracked_companies can't be reached.
+FALLBACK_TICKERS = ["RILY", "ASTS", "LRCX", "QCOM"]
+EXCLUDED_TICKERS = {"SKHY", "CWBHF"}  # no meaningful US options market
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
+
+
+def get_tracked_tickers(conn):
+    """Reads the tracked ticker list from tracked_companies (same source the
+    website's Settings page writes to) instead of a hardcoded list, so a
+    stock added on the site picks up this signal automatically."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT ticker FROM tracked_companies ORDER BY ticker")
+            tickers = [row[0] for row in cur.fetchall()]
+        if not tickers:
+            tickers = FALLBACK_TICKERS
+    except Exception as e:
+        print(f"Could not read tracked_companies: {e}. Using fallback list.")
+        tickers = FALLBACK_TICKERS
+    return [t for t in tickers if t not in EXCLUDED_TICKERS]
 
 
 # --- Fetch -------------------------------------------------------------
@@ -102,8 +119,9 @@ def main():
 
     conn = psycopg2.connect(DATABASE_URL)
     success_count = 0
+    tickers = get_tracked_tickers(conn)
 
-    for ticker in TRACKED_TICKERS:
+    for ticker in tickers:
         print(f"\n--- {ticker} ---")
         try:
             snapshot = fetch_options_snapshot(ticker)
@@ -127,7 +145,7 @@ def main():
             conn.rollback()
 
     conn.close()
-    print(f"\nDone. {success_count}/{len(TRACKED_TICKERS)} tickers succeeded.")
+    print(f"\nDone. {success_count}/{len(tickers)} tickers succeeded.")
 
 
 if __name__ == "__main__":
