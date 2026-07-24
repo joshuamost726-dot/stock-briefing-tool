@@ -147,7 +147,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
 
     signalsById.institutional_buying = {
       hasData: !!d.holderCount,
-      status: instScore >= 70 ? 'positive' : instScore >= 50 ? 'neutral' : 'negative',
+      status: d.tooFewHoldersToScore ? 'neutral' : instScore >= 70 ? 'positive' : instScore >= 50 ? 'neutral' : 'negative',
       headline: d.holderCount
         ? `${d.holderCount.toLocaleString()} institutional holder(s) on file`
         : 'No institutional holdings on file',

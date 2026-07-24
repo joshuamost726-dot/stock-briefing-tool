@@ -40,6 +40,18 @@ const TOP_TIER_FUNDS = [
 // not evidence of deliberate positioning.
 const MIN_HOLDERS_FOR_CONCENTRATION = 20;
 
+// Below this many holders, WITHOUT momentum to lean on instead, breadth and
+// concentration are both too noisy to score at all — the breadth formula is
+// calibrated for large-cap-scale ownership (hundreds to thousands of
+// holders), and naturally reads as a low score for a thinly-covered small
+// cap that just doesn't have many institutional holders yet. That's not
+// bearish evidence, it's insufficient sample size, and treating it as a
+// negative signal is actively misleading. Only applies when momentum is
+// unavailable — quarter-over-quarter momentum is meaningful regardless of
+// how many holders exist, since it's about specific known funds' position
+// changes, not aggregate breadth.
+const MIN_HOLDERS_FOR_SCORING_WITHOUT_MOMENTUM = 10;
+
 // Ceiling applied when quarter-over-quarter change is unavailable.
 const MAX_SCORE_WITHOUT_MOMENTUM = 60;
 
@@ -136,6 +148,39 @@ async function getInstitutionalBuyingSignal(ticker, position = null) {
     else if (netPct > 45) momentumScore = 50;
     else if (netPct > 35) momentumScore = 30;
     else momentumScore = 15;
+  }
+
+  const tooFewHoldersToScore = !momentumAvailable && holderCount < MIN_HOLDERS_FOR_SCORING_WITHOUT_MOMENTUM;
+
+  if (tooFewHoldersToScore) {
+    let explanation = `${holderCount.toLocaleString()} institutional holder(s) as of ${period} — too few to ` +
+      `score breadth/concentration meaningfully. This isn't bearish evidence, just insufficient sample size ` +
+      `for a metric calibrated to large-cap-scale ownership.`;
+    if (impliedAvgPrice != null) {
+      explanation += ` Implied average price across holders (value ÷ shares, an approximation, not a reported trade price): $${impliedAvgPrice.toFixed(2)}.`;
+    }
+    if (positionContext) {
+      explanation += ` Your cost basis is $${positionContext.userCostBasis.toFixed(2)} — that's ` +
+        `${positionContext.direction === 'similar' ? 'a similar price to' : `${Math.abs(positionContext.pctDifference).toFixed(0)}% ${positionContext.direction} the`} implied institutional average.`;
+    }
+
+    return {
+      ticker,
+      confidenceScore: 0,
+      multiplier: 0,
+      label: 'Too Few Holders to Score',
+      momentumAvailable: false,
+      explanation,
+      detail: {
+        holderCount,
+        top10Pct,
+        totalValue,
+        impliedAvgPrice,
+        positionContext,
+        tooFewHoldersToScore: true,
+        period,
+      },
+    };
   }
 
   // --- Weighted score ---
