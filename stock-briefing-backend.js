@@ -1432,6 +1432,10 @@ app.get('/api/portfolio', async (req, res) => {
   }
 });
 
+app.get('/api/settings', (req, res) => {
+  res.json({ email: data.email });
+});
+
 app.post('/api/settings', (req, res) => {
   data.email = req.body.email || data.email;
   saveData(data);
