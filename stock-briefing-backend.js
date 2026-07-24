@@ -568,8 +568,15 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// Data file for storage
-const DATA_FILE = path.join(__dirname, 'data.json');
+// Data file for storage — lives on a persistent Railway volume mounted at
+// /data in production so tracked stocks, positions, and email survive
+// redeploys (the app's own working directory is ephemeral and gets wiped on
+// every deploy, which is exactly why positions kept resetting before this).
+// Falls back to a local file next to the script when /data doesn't exist
+// (local development, where there's no mounted volume).
+const DATA_FILE = fs.existsSync('/data')
+  ? '/data/data.json'
+  : path.join(__dirname, 'data.json');
 
 // Load or initialize data
 function loadData() {
