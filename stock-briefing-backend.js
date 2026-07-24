@@ -577,6 +577,7 @@ app.use(cors());
 const DATA_FILE = fs.existsSync('/data')
   ? '/data/data.json'
   : path.join(__dirname, 'data.json');
+console.log(`[DATA_FILE] resolved to ${DATA_FILE} (/data exists: ${fs.existsSync('/data')}, file exists: ${fs.existsSync(DATA_FILE)})`);
 
 // Load or initialize data
 function loadData() {
