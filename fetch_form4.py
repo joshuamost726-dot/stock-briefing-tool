@@ -7,11 +7,6 @@ and inserts them into the insider_transactions table.
 Usage:
   python fetch_form4.py                 # incremental — last 7 days
   python fetch_form4.py --backfill 365  # backfill N days (run once, first time)
-
-Notes:
-- SKHY (Korean listing) and CWBHF (Toronto listing) are foreign filers and
-  will never have Form 4s, same limitation as DEF 14A / executive_compensation.
-- SEC requires a descriptive User-Agent on all requests, or you get blocked.
 """
 
 import argparse
@@ -24,8 +19,6 @@ import requests
 import psycopg2
 from psycopg2.extras import execute_values
 
-# --- Config ---------------------------------------------------------------
-
 USER_AGENT = "Josh Most joshuamost726@gmail.com"
 
 TRACKED_CIKS = {
@@ -33,14 +26,19 @@ TRACKED_CIKS = {
     "ASTS": "0001780312",
     "LRCX": "0000707549",
     "QCOM": "0000804328",
-    # SKHY and CWBHF intentionally excluded — foreign filers, no Form 4
+    # CWBHF (Charlotte's Web) was previously assumed to be a foreign filer
+    # with no Form 4 coverage because its primary listing is the TSX — that
+    # was wrong. It files 10-Ks/Form 4s as a genuine domestic SEC registrant
+    # (CIK below), confirmed via a real open-market insider purchase on file.
+    # SKHY (SK Hynix) is NOT added here — it's a true foreign private issuer
+    # (Korea Exchange primary listing) and is exempt from Section 16/Form 4
+    # reporting entirely; there is no US insider data to fetch for it.
+    "CWBHF": "0001750155",
 }
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 HEADERS = {"User-Agent": USER_AGENT}
 
-
-# --- SEC EDGAR fetch helpers ------------------------------------------------
 
 def get_filing_index(cik, days_back):
     cik_padded = cik.lstrip("0").zfill(10)
@@ -69,15 +67,15 @@ def get_filing_index(cik, days_back):
 
 
 def fetch_form4_xml(cik, accession, primary_doc):
+    """Fetch and return the raw XML content of a specific Form 4 filing."""
     accn_nodashes = accession.replace("-", "")
     cik_nozeros = cik.lstrip("0")
-    url = f"https://www.sec.gov/Archives/edgar/data/{cik_nozeros}/{accn_nodashes}/{primary_doc}"
+    doc_filename = primary_doc.split("/")[-1]
+    url = f"https://www.sec.gov/Archives/edgar/data/{cik_nozeros}/{accn_nodashes}/{doc_filename}"
     resp = requests.get(url, headers=HEADERS, timeout=30)
     resp.raise_for_status()
     return resp.text
 
-
-# --- XML parsing -----------------------------------------------------------
 
 def parse_form4_xml(xml_text, ticker, cik):
     import xml.etree.ElementTree as ET
@@ -85,7 +83,9 @@ def parse_form4_xml(xml_text, ticker, cik):
     transactions = []
     try:
         root = ET.fromstring(xml_text)
-    except ET.ParseError:
+    except ET.ParseError as e:
+        print(f"    [DEBUG] XML parse error: {e}")
+        print(f"    [DEBUG] First 300 chars of response: {xml_text[:300]!r}")
         return transactions
 
     owner_name = None
@@ -104,7 +104,13 @@ def parse_form4_xml(xml_text, ticker, cik):
         elif relationship_el.find("isTenPercentOwner") is not None and relationship_el.find("isTenPercentOwner").text == "1":
             owner_title = "10% Owner"
 
-    for txn in root.findall(".//nonDerivativeTable/nonDerivativeTransaction"):
+    non_deriv = root.findall(".//nonDerivativeTable/nonDerivativeTransaction")
+    deriv = root.findall(".//derivativeTable/derivativeTransaction")
+    if not non_deriv:
+        print(f"    [DEBUG] owner={owner_name!r}, 0 nonDerivativeTransaction found, "
+              f"{len(deriv)} derivativeTransaction found, root tag={root.tag!r}")
+
+    for txn in non_deriv:
         try:
             txn_date = txn.find(".//transactionDate/value").text
             txn_code = txn.find(".//transactionCoding/transactionCode").text
@@ -136,8 +142,6 @@ def parse_form4_xml(xml_text, ticker, cik):
     return transactions
 
 
-# --- Database --------------------------------------------------------------
-
 def insert_transactions(conn, transactions, filed_at):
     if not transactions:
         return 0
@@ -168,8 +172,6 @@ def insert_transactions(conn, transactions, filed_at):
     conn.commit()
     return inserted
 
-
-# --- Main --------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser()
