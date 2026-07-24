@@ -15,6 +15,7 @@ const { getOffExchangeSignal } = require('./offExchangeScore.js');
 const { getWsbSentimentSignal } = require('./wsbSentimentScore.js');
 const { getKoreaOwnershipSignal } = require('./koreaOwnershipScore.js');
 const { getKoreaMajorShareholderSignal } = require('./koreaMajorShareholderScore.js');
+const { getKoreaCapitalActionsSignal } = require('./koreaCapitalActionsScore.js');
 const { getPriceTarget } = require('./priceTargetData.js');
 const { getVerdict } = require('./noiseScore.js');
 const { explainSignalPlainly } = require('./signalExplainer.js');
@@ -540,6 +541,54 @@ async function computeAllSignals(ticker, stockData, position = null) {
   }
   })());
 
+  // Signal: Korea capital actions (SKHY only — buybacks/share issuances,
+  // the closest Korean equivalent to US buyback/offering disclosures)
+  signalPromises.push((async () => {
+  try {
+    const capActions = await getKoreaCapitalActionsSignal(ticker);
+    const d = capActions.detail || {};
+
+    if (capActions.hasSignal && capActions.confidenceScore > 0) {
+      // Buybacks lean bullish, issuances lean dilutive/bearish-ish, mixed
+      // stays neutral — same bullish-contribution convention as
+      // off_exchange/short_interest.
+      const bullishContribution = capActions.direction === 'buyback'
+        ? capActions.confidenceScore
+        : capActions.direction === 'issuance'
+        ? 100 - capActions.confidenceScore
+        : 50;
+
+      scores.push(bullishContribution);
+      plainParts.push(capActions.explanation);
+    }
+
+    signalsById.korea_capital_actions = {
+      hasData: capActions.hasSignal,
+      status: !capActions.hasSignal ? 'neutral'
+            : capActions.direction === 'buyback' ? 'positive'
+            : capActions.direction === 'issuance' ? 'negative'
+            : 'neutral',
+      headline: capActions.hasSignal
+        ? `${d.buybackCount} buyback(s), ${d.issuanceCount} issuance(s) on file`
+        : capActions.label,
+      detail: capActions.explanation,
+      validation: {
+        timing: 'Based on filings seen in our own daily fetch history (these report types don\'t return a convenient filing date).',
+        scaleVsSalary: 'Not applicable to corporate capital actions.',
+        trackRecord: 'No data available — requires accumulated history of past actions vs. subsequent price moves.',
+        corroboration: 'Single company\'s own decision — no multi-party corroboration concept applies here.'
+      },
+      freshness: {
+        lastChecked: d.lastChecked || null,
+        schedule: 'Updates automatically, daily'
+      }
+    };
+    if (capActions.hasSignal && capActions.confidenceScore > 0) activeStatuses.push(signalsById.korea_capital_actions.status);
+  } catch (err) {
+    console.error(`Korea capital actions signal failed for ${ticker}:`, err);
+  }
+  })());
+
   await Promise.all(signalPromises);
 
   // Signal 2: Analyst ratings
@@ -581,6 +630,7 @@ const SIGNAL_ORDER = [
   { id: 'institutional_buying', label: 'Institutional Buying',  source: 'SEC EDGAR (13F)',       category: 'Company Filings' },
   { id: 'korea_ownership',      label: 'Korea Ownership Change', source: 'Open DART (Korea FSS)', category: 'Company Filings' },
   { id: 'korea_major_shareholder', label: 'Korea Major Shareholder', source: 'Open DART (Korea FSS)', category: 'Company Filings' },
+  { id: 'korea_capital_actions', label: 'Korea Capital Actions', source: 'Open DART (Korea FSS)', category: 'Company Filings' },
   { id: 'earnings_whisper',     label: 'Earnings Whisper',      source: null,                    category: 'Analyst & Estimates' },
   { id: 'analyst_rating',       label: 'Analyst Rating Change', source: 'Finnhub',               category: 'Analyst & Estimates' },
   { id: 'short_interest',       label: 'Short Interest',        source: 'FINRA (via Nasdaq)',    category: 'Market Activity' },
@@ -618,7 +668,7 @@ const INAPPLICABLE_SIGNALS_BY_TICKER = {
 
 // Korea DART signals are structurally inapplicable to every ticker except
 // SKHY — there's no Korean disclosure regime to look up for a US company.
-const KOREA_ONLY_SIGNALS = ['korea_ownership', 'korea_major_shareholder'];
+const KOREA_ONLY_SIGNALS = ['korea_ownership', 'korea_major_shareholder', 'korea_capital_actions'];
 
 function getApplicableSignalOrder(ticker) {
   const inapplicable = new Set([

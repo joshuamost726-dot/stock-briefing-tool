@@ -52,7 +52,10 @@ async function explainSignalPlainly({ headline, detail, positionContext }) {
       system:
         'You explain one financial data signal to a retail investor in short, plain sentences — ' +
         'what it found and what it means, using only the structured facts given. Do not add facts ' +
-        'not present in the input. No hedging filler, no "as an AI", no bullet points — prose only. ' +
+        'not present in the input. If a ticker symbol appears in the input, use it exactly as given — ' +
+        'never guess or expand what company name it might stand for; if you don\'t already know the ' +
+        'company, just use the ticker as-is. No hedging filler, no "as an AI", no bullet points — ' +
+        'prose only. ' +
         (hasPositionContext ? POSITION_REASONING_GUIDANCE : 'Keep it to 1-2 sentences.'),
       messages: [{ role: 'user', content: JSON.stringify({ headline, detail, positionContext }) }],
     });

@@ -33,3 +33,9 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OPENDART_API_KEY: ${{ secrets.OPENDART_API_KEY }}
         run: python fetch_korea_major_shareholders.py
+
+      - name: Run Korea capital actions fetch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENDART_API_KEY: ${{ secrets.OPENDART_API_KEY }}
+        run: python fetch_korea_capital_actions.py
