@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A personal stock briefing tool for a single user (joshuamost726@gmail.com). A Node.js backend emails
-a briefing 3x/day (8am, 1pm, 5pm UTC) and serves a "conviction score" API; a set of Python scripts
-(run on schedule via GitHub Actions) fill a Postgres database with SEC/market data that the backend's
+A personal stock briefing tool for a single user (joshuamost726@gmail.com). A Node.js backend serves
+a "conviction score" API and dashboard/portfolio data; a set of Python scripts (run on schedule via
+GitHub Actions) fill a Postgres database with SEC/market/Korean-disclosure data that the backend's
 scoring functions read from. There are two separate, independently deployed halves:
 
-- **Backend** (`stock-briefing-backend.js`) — Express + node-cron, deployed to Railway.
+- **Backend** (`stock-briefing-backend.js`) — Express, deployed to Railway.
 - **Frontend** (`src/`) — Create React App, deployed to Vercel, talks to the backend via
   `REACT_APP_API_URL`.
 - **Data pipeline** (`fetch_*.py`, `sweep_13f.py`, `probe_13f.py`, `parse_def14a.py`) — scheduled
@@ -93,11 +93,11 @@ or the call fails.
 2. `stock-briefing-backend.js` queries Postgres (via the `*Score.js` modules) and external live
    APIs (Finnhub for quotes/profile/recommendations/earnings, NewsAPI for news) on each request —
    there's no caching layer, every API call hits Finnhub/NewsAPI directly.
-3. `data.json` (gitignored, created at runtime next to the backend script) is separate,
-   file-based storage for the tracked-stock list, user email, and briefing history — this is NOT in
-   Postgres. `loadData()`/`saveData()` read/write it directly; there's no migration path if the
-   Railway filesystem resets, so tracked stocks reset to the hardcoded default list in `loadData()`
-   if `data.json` is missing.
+3. `data.json` lives on a persistent Railway volume mounted at `/data` (falls back to a local file
+   next to the script when `/data` doesn't exist, i.e. local dev) — file-based storage for the
+   tracked-stock list and each stock's cost-basis position. This is NOT in Postgres. `loadData()`/
+   `saveData()` read/write it directly; if the volume is ever detached, tracked stocks reset to the
+   hardcoded default list in `loadData()`.
 4. Ticker universes differ per script and are NOT unified: `stock-briefing-backend.js`'s default
    tracked list, `fetch_form4.py`'s `TRACKED_CIKS`, and `fetch_short_interest.py` /
    `fetch_options_volume.py` / `fetch_price_targets.py`'s `TRACKED_TICKERS` are separate hardcoded
@@ -107,17 +107,16 @@ or the call fails.
 5. `sweep_13f.py` requires manually editing the `YEAR`/`QUARTER` constants before each run and is
    only triggered manually (`workflow_dispatch`, no schedule) — unlike the other fetch scripts.
 
-### Email delivery
-
-Nodemailer sends via Gmail using an app password (`GMAIL_USER`/`GMAIL_PASSWORD`), scheduled with
-`node-cron` inside the long-running backend process (not GitHub Actions) — the three daily cron
-expressions (8am/1pm/5pm UTC) live directly in `stock-briefing-backend.js`.
-
 ## Environment variables
 
-Backend (Railway): `GMAIL_USER`, `GMAIL_PASSWORD`, `ALPHA_VANTAGE_KEY`, `NEWS_API_KEY`,
-`FINNHUB_API_KEY`, `DATABASE_URL`, `PORT`, `ANTHROPIC_API_KEY` (optional — see below). Frontend
-(Vercel): `REACT_APP_API_URL`. Python scripts (GitHub Actions secrets): `DATABASE_URL` only.
+Backend (Railway): `ALPHA_VANTAGE_KEY`, `NEWS_API_KEY`, `FINNHUB_API_KEY`, `DATABASE_URL`, `PORT`,
+`ANTHROPIC_API_KEY` (optional — see below). Frontend (Vercel): `REACT_APP_API_URL`. Python scripts
+(GitHub Actions secrets): `DATABASE_URL`, plus `QUIVER_API_KEY`/`OPENDART_API_KEY` for the scripts
+that need them.
+
+Note: there used to be an automated email briefing feature (Nodemailer + node-cron, `GMAIL_USER`/
+`GMAIL_PASSWORD`) — removed entirely (2026-07-24) in favor of the website/Dashboard as the only
+interface. If those Railway env vars are still set, they're unused and safe to delete whenever.
 
 Note `ALPHA_VANTAGE_KEY` is documented in `.env.example`/README but the backend code currently only
 calls Finnhub for quotes — Alpha Vantage isn't wired into `stock-briefing-backend.js`.

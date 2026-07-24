@@ -1,7 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const cron = require('node-cron');
-const nodemailer = require('nodemailer');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -792,9 +790,7 @@ function loadData() {
       { ticker: 'LRCX', name: 'Lam Research' },
       { ticker: 'QCOM', name: 'Qualcomm' },
       { ticker: 'CWBHF', name: 'Charlottes Web' }
-    ],
-    email: 'joshuamost726@gmail.com',
-    briefings: []
+    ]
   };
 }
 
@@ -808,15 +804,6 @@ let data = loadData();
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY;
 const NEWS_API_KEY = process.env.NEWS_API_KEY;
 const ALPHA_VANTAGE_KEY = process.env.ALPHA_VANTAGE_KEY;
-
-// Email setup
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_PASSWORD
-  }
-});
 
 // Finnhub API calls
 async function getStockQuote(ticker) {
@@ -972,116 +959,6 @@ async function getStockData(ticker) {
   }
 }
 
-// Generate insight from data
-function generateInsight(stockData) {
-  if (stockData.error) {
-    return `❌ ${stockData.ticker}: ${stockData.error}`;
-  }
-
-  const { ticker, quote, profile, recommendations, nextEarnings, news } = stockData;
-  const changeColor = quote.change >= 0 ? '📈' : '📉';
-  
-  let insight = `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-  insight += `${changeColor} ${ticker} - ${profile.name}\n`;
-  insight += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-  
-  insight += `💰 PRICE DATA\n`;
-  insight += `Current: $${quote.price.toFixed(2)}\n`;
-  insight += `Change: ${quote.change.toFixed(2)} (${quote.changePercent.toFixed(2)}%)\n`;
-  insight += `52W High: ${quote.high.toFixed(2)} | 52W Low: ${quote.low.toFixed(2)}\n`;
-  insight += `Volume: ${quote.volume ? (quote.volume / 1000000).toFixed(2) + 'M' : 'N/A'}\n`;
-
-  insight += `📊 FUNDAMENTALS\n`;
-  insight += `PE Ratio: ${profile.pe !== 'N/A' ? profile.pe.toFixed(2) : 'N/A'}\n`;
-  insight += `Market Cap: ${profile.marketCap && profile.marketCap > 0 ? '$' + (profile.marketCap / 1000000000).toFixed(2) + 'B' : 'N/A'}\n`;
-  insight += `Industry: ${profile.industry}\n\n`;
-
-  if (recommendations) {
-    const total = recommendations.buy + recommendations.hold + recommendations.sell;
-    insight += `⭐ ANALYST RATINGS\n`;
-    insight += `Buy: ${recommendations.buy} | Hold: ${recommendations.hold} | Sell: ${recommendations.sell}\n`;
-    insight += `Consensus: ${Math.round((recommendations.buy / total) * 100)}% Bullish\n\n`;
-  }
-
-  if (nextEarnings) {
-    insight += `📅 UPCOMING EARNINGS\n`;
-    insight += `Date: ${nextEarnings.date || 'TBD'}\n`;
-    insight += `EPS Estimate: $${nextEarnings.epsEstimate || 'N/A'}\n\n`;
-  }
-
-  if (news.length > 0) {
-    insight += `📰 TOP NEWS\n`;
-    news.slice(0, 2).forEach((article, idx) => {
-      insight += `${idx + 1}. ${article.title}\n   Source: ${article.source}\n\n`;
-    });
-  }
-
-  return insight;
-}
-
-// Main briefing generator
-async function sendBriefing() {
-  try {
-    const stocksData = await Promise.all(
-      data.stocks.map(stock => getStockData(stock.ticker))
-    );
-
-    let briefingText = '📈 STOCK BRIEFING REPORT\n';
-    briefingText += `Generated: ${new Date().toLocaleString()}\n`;
-    briefingText += `=====================================\n\n`;
-
-    for (const stock of stocksData) {
-  briefingText += generateInsight(stock);
-  
-  try {
-    const signal = await getInstitutionalBuyingSignal(stock.ticker);
-    if (signal) {
-      briefingText += `\n💡 Smart Money Signal: ${signal.explanation}\n`;
-    }
-  } catch (error) {
-    console.error(`Error fetching conviction score for ${stock.ticker}:`, error.message);
-  }
-}
-
-    briefingText += `\n=====================================\n`;
-    briefingText += `Dashboard: https://stock-briefing-frontend1.vercel.app\n`;
-
-    // Save to history
-    data.briefings.push({
-      timestamp: new Date().toISOString(),
-      content: briefingText,
-      stocks: stocksData
-    });
-
-    // Keep last 30 briefings
-    if (data.briefings.length > 30) {
-      data.briefings = data.briefings.slice(-30);
-    }
-    saveData(data);
-
-    // Send email
-    await transporter.sendMail({
-      from: process.env.GMAIL_USER,
-      to: data.email,
-      subject: `📊 Stock Briefing - ${new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`,
-      text: briefingText,
-      html: `<pre style="font-family: monospace; white-space: pre-wrap;">${briefingText}</pre>`
-    });
-
-    console.log(`✅ Briefing sent at ${new Date().toISOString()}`);
-  } catch (error) {
-    console.error('Error sending briefing:', error);
-  }
-}
-
-// Schedule briefings (UTC times)
-// 8 AM UTC
-cron.schedule('0 8 * * *', sendBriefing);
-// 1 PM UTC
-cron.schedule('0 13 * * *', sendBriefing);
-// 5 PM UTC
-cron.schedule('0 17 * * *', sendBriefing);
-
 // API Routes
 app.get('/api/stocks', (req, res) => {
   res.json(data.stocks);
@@ -1137,19 +1014,17 @@ app.delete('/api/stocks/:ticker/position', (req, res) => {
   res.json(stock);
 });
 
-app.get('/api/briefings', (req, res) => {
-  res.json(data.briefings.slice(-10));
-});
-
+// Per-stock summary feeding the Dashboard's ticker grid — name kept as
+// "briefing" for now since the URL is unchanged, but this no longer has
+// anything to do with the (removed) email feature.
 app.get('/api/briefing/latest', async (req, res) => {
   try {
     const stocksData = await Promise.all(
       data.stocks.map(stock => getStockData(stock.ticker))
     );
 
-   // Attach conviction score to each stock — same signal set as /api/ticker/:ticker.
     // Each stock's signal computation is independent of every other stock's,
-    // so run all 6 concurrently instead of one at a time.
+    // so run all of them concurrently instead of one at a time.
     await Promise.all(stocksData.map(async (stock) => {
       const { scores, plainParts } = await computeAllSignals(stock.ticker, stock);
 
@@ -1161,18 +1036,7 @@ app.get('/api/briefing/latest', async (req, res) => {
         : 0;
     }));
 
-    let briefing = '📈 STOCK BRIEFING REPORT\n';
-    briefing += `Generated: ${new Date().toLocaleString()}\n`;
-    briefing += `=====================================\n\n`;
-
-    stocksData.forEach(stock => {
-      briefing += generateInsight(stock);
-    });
-
-    briefing += `\n=====================================\n`;
-    briefing += `Dashboard: https://stock-briefing-frontend1.vercel.app\n`;
-
-    res.json({ briefing, stocks: stocksData });
+    res.json({ stocks: stocksData });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1430,16 +1294,6 @@ app.get('/api/portfolio', async (req, res) => {
     console.error('[portfolio]', error);
     res.status(500).json({ error: 'Failed to build portfolio summary' });
   }
-});
-
-app.get('/api/settings', (req, res) => {
-  res.json({ email: data.email });
-});
-
-app.post('/api/settings', (req, res) => {
-  data.email = req.body.email || data.email;
-  saveData(data);
-  res.json({ email: data.email });
 });
 
 const PORT = process.env.PORT || 5000;

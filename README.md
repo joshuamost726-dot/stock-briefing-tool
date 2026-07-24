@@ -1,164 +1,104 @@
 # 📈 Stock Briefing Tool
 
-Automated stock briefing system that sends you briefings at 8am, 1pm, and 5pm daily with price data, news, technical analysis, and volume info.
+A personal "smart money tracker" dashboard for a small set of tracked stocks. Combines up to 14
+independent signals (insider buying, institutional/13F activity, short interest, options volume,
+congressional trading, government contracts, Reddit/WSB attention, Korean disclosure data for
+foreign-listed tickers, technical momentum, and more) into one 0-100 conviction score per ticker,
+with Claude-generated plain-English explanations throughout.
 
-**Currently tracking:** BRC (Brinks), SKHY (Skyline)
+There's no automated email — everything lives on the website (Dashboard + per-ticker pages +
+Settings), updated by scheduled data-fetch jobs running in the background.
 
----
+## What it does
 
-## Setup Instructions
+- **Dashboard** — every tracked stock's conviction score at a glance, plus a portfolio summary
+  (total value, today's $/% change, a value trend chart) if you've entered cost-basis positions.
+- **Per-ticker pages** — the full signal breakdown grouped by category, a price history chart, news
+  with a one-line Claude explanation of what each headline means for the stock, upcoming dates
+  (earnings, next 13F sweep, etc.), a rule-based "bottom line" verdict, and a separate "Ask Claude"
+  section with a genuinely opinionated (not fact-restricted) AI take.
+- **Position tracking** — enter your cost basis and share count per ticker (on the ticker page or in
+  bulk via Settings) and BUY/HOLD/SELL calls adjust for whether you'd be chasing a stock that's
+  already run, or averaging down on a loser.
+- **Settings** — manage your tracked stock list and every position in one place.
 
-### Step 1: Get API Keys
+Signals that are structurally impossible for a given ticker (e.g. FINRA short interest for a
+foreign-listed stock) are automatically excluded from that ticker's signal count, rather than sitting
+around forever as an empty "No Data" card.
 
-You need 3 things:
+## Architecture
 
-#### A) Alpha Vantage (Stock Prices)
-1. Go to https://www.alphavantage.co/
-2. Click "GET FREE API KEY"
-3. Enter your email, click the link they send
-4. Copy your API key
+Two independently deployed pieces, plus a scheduled data pipeline:
 
-#### B) NewsAPI (Latest News)
-1. Go to https://newsapi.org/
-2. Sign up (free tier is fine)
-3. Go to Dashboard → API keys
-4. Copy your API key
+- **Backend** (`stock-briefing-backend.js`) — Express, deployed to Railway. Serves the API; reads
+  from Postgres (via each `*Score.js` signal module) and calls a few live APIs (Finnhub, NewsAPI,
+  Anthropic) directly on each request.
+- **Frontend** (`src/`) — Create React App, deployed to Vercel, talks to the backend via
+  `REACT_APP_API_URL`.
+- **Data pipeline** (`fetch_*.py`, `sweep_13f.py`) — Python scripts scheduled independently via
+  GitHub Actions (see `.github/workflows/`), writing directly to the same Postgres database the
+  backend reads from. No API between the scripts and the backend — Postgres is the integration
+  point.
 
-#### C) Gmail App Password
-1. Go to https://myaccount.google.com/
-2. Click "Security" in the left menu
-3. Scroll down to "App passwords"
-4. Select "Mail" and "Windows Computer" (or whatever)
-5. Google gives you a 16-character password
-6. Copy it (this is NOT your regular password)
+See `CLAUDE.md` for the full architecture writeup (signal-by-signal breakdown, data flow, known
+quirks).
 
----
+## Setup
 
-### Step 2: Deploy to Railway
+### 1. Environment variables
 
-1. **Create Railway Account**
-   - Go to https://railway.app/
-   - Sign up with GitHub (easiest)
+Backend (Railway) needs, at minimum:
+```
+FINNHUB_API_KEY=...      # quotes, profile, analyst ratings, earnings calendar
+NEWS_API_KEY=...         # news headlines
+DATABASE_URL=...         # Postgres connection string
+ANTHROPIC_API_KEY=...    # optional — without it, Claude-written prose falls back to rule-based text everywhere
+ALPHA_VANTAGE_KEY=...    # documented but not currently called by any code path
+```
+See `.env.example`.
 
-2. **Create New Project**
-   - Click "New Project" → "Deploy from GitHub"
-   - Connect your GitHub account
-   - Create a new public repo called `stock-briefing-tool`
-   - Push these files to that repo
+The Python data pipeline (run via GitHub Actions — set these as **repository secrets**, not backend
+env vars) needs `DATABASE_URL`, plus `QUIVER_API_KEY` and `OPENDART_API_KEY` for the specific scripts
+that use them (congressional trading/gov contracts/off-exchange volume, and the Korea-specific
+signals, respectively).
 
-3. **Add Environment Variables**
-   - In Railway dashboard, go to your project
-   - Click "Variables" (at the top)
-   - Add these variables:
-     ```
-     GMAIL_USER = your_email@gmail.com
-     GMAIL_PASSWORD = your_16_char_app_password
-     ALPHA_VANTAGE_KEY = your_alpha_vantage_key
-     NEWS_API_KEY = your_newsapi_key
-     ```
+### 2. A persistent volume for the backend
 
-4. **Deploy**
-   - Railway auto-deploys when you push to GitHub
-   - Watch the logs to make sure it starts
+`data.json` (the tracked-stock list and cost-basis positions) needs to live on a **persistent Railway
+volume** mounted at `/data` — without one, it resets to the hardcoded default stock list on every
+deploy. See `CLAUDE.md`'s data flow section.
 
----
+### 3. Deploy
 
-### Step 3: Get Your Backend URL
+- **Backend**: push to the GitHub repo Railway is connected to; it auto-deploys.
+- **Frontend**: push to the GitHub repo Vercel is connected to, with `REACT_APP_API_URL` set to the
+  Railway backend's URL.
+- **Data pipeline**: each script in `.github/workflows/*.yml` runs on its own schedule automatically
+  once its secrets are set; most also support a manual `workflow_dispatch` trigger from the Actions
+  tab for testing.
 
-Once deployed:
-1. In Railway, click on your deployment
-2. Look for "Railway URL" or "External URL"
-3. Copy it (looks like `https://something.railway.app`)
-4. This is your `REACT_APP_API_URL`
+### 4. Adding a stock
 
----
-
-### Step 4: Deploy Frontend (Optional but Recommended)
-
-You have two options:
-
-**Option A: Vercel (Easy)**
-1. Push a `public/index.html` version of the app to GitHub
-2. Go to https://vercel.com/
-3. Import your GitHub repo
-4. Add environment variable: `REACT_APP_API_URL=https://your-railway-url`
-5. Deploy
-
-**Option B: Run Locally**
-- Just run the React app on your computer with:
-  ```
-  npm install
-  npm start
-  ```
-- Set `REACT_APP_API_URL=http://localhost:5000`
-
----
-
-## Adding More Stocks
-
-Once running, you can add stocks through the web app:
-1. Go to "Manage Stocks" tab
-2. Enter ticker (e.g., AAPL, TSLA)
-3. Click "Add Stock"
-
-They'll be included in future 8am, 1pm, 5pm briefings.
-
----
-
-## How It Works
-
-**Backend (Node.js on Railway):**
-- Runs 24/7
-- At 8am, 1pm, 5pm daily (UTC):
-  - Pulls latest price data from Alpha Vantage
-  - Fetches latest news from NewsAPI
-  - Generates briefing report
-  - Sends email to `joshuamost726@gmail.com`
-  - Saves to history
-
-**Frontend (React):**
-- Dashboard to view briefings on demand
-- Manage tracked stocks
-- View briefing history
-- Update email address
-
----
-
-## Troubleshooting
-
-**"Email not sending?"**
-- Check Gmail app password is correct
-- Make sure 2FA is enabled on Gmail first
-
-**"Stock data not showing?"**
-- Alpha Vantage free tier has rate limits (5 calls/min)
-- Wait a bit and try again
-- Check API key is valid
-
-**"Railway keeps crashing?"**
-- Check logs in Railway dashboard
-- Make sure all environment variables are set
-- Ensure Node.js version is 18.x
-
----
+Currently: add it in the Settings page (updates the tracked-stock list the website uses). **Known
+limitation:** most of the Python fetch scripts have their own hardcoded ticker lists that don't read
+from the same source yet, so a newly added stock will only get the signals that don't depend on one
+of those scripts (analyst rating, technical momentum) until that's unified.
 
 ## Cost
 
-- **Railway**: Free tier includes $5/month credit (this easily covers your use)
-- **Alpha Vantage**: Free (5 calls/min limit)
-- **NewsAPI**: Free (500 calls/day limit)
-- **Gmail**: Free
+Personal-use budget, roughly $50/month: Railway hosting (~$5-12), Quiver Quantitative Hobbyist tier
+($30/mo), Anthropic API usage (~$0.50-1.50/mo at Haiku pricing), domain (~$1-2/mo if you set one up).
+Open DART, ApeWisdom, Finnhub's free tier, NewsAPI's free tier, and yfinance are all free.
 
-Total: **$0** (within free limits)
+## Troubleshooting
 
----
+**"A signal always shows 'No Data' for one ticker"** — check whether that signal is structurally
+possible for that ticker at all (see `CLAUDE.md`'s per-ticker exclusion notes) before assuming
+something's broken.
 
-## Support
+**"Railway keeps crashing"** — check the deployment logs in the Railway dashboard, and confirm every
+required env var above is actually set.
 
-If something breaks, check:
-1. Railway logs (in the dashboard)
-2. Environment variables are all set correctly
-3. Gmail app password (not regular password)
-4. API key validity
-
-Let me know if you hit any issues!
+**"A scheduled fetch script doesn't seem to be running"** — check the Actions tab on GitHub for that
+workflow's run history; most can also be triggered manually via `workflow_dispatch` to test in
+isolation.
