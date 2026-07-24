@@ -5,6 +5,12 @@ const nodemailer = require('nodemailer');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const { Pool } = require('pg');
+
+// Used directly by this file for routes that read daily_prices (price
+// history, portfolio value) — everything else goes through each *Score.js
+// module's own pool, matching the existing (if imperfect) per-file pattern.
+const dbPool = new Pool({ connectionString: process.env.DATABASE_URL });
 const { getInstitutionalBuyingSignal } = require('./convictionScore.js');
 const { getInsiderBuyingSignal } = require('./insiderScore.js');
 const { getShortInterestSignal } = require('./shortInterestScore.js');
@@ -1274,6 +1280,155 @@ app.get('/api/ticker/:ticker', async (req, res) => {
   } catch (error) {
     console.error(`[ticker/${ticker}]`, error);
     res.status(500).json({ error: 'Failed to build ticker detail' });
+  }
+});
+
+// Daily close/volume history for the per-stock price chart — same
+// daily_prices table technicalScore.js reads from (see
+// fetch_technical_prices.py for why SKHY's rows are actually SK Hynix's
+// Korea Exchange listing, priced in KRW, not the thin US OTC line).
+app.get('/api/ticker/:ticker/history', async (req, res) => {
+  const ticker = String(req.params.ticker || '').toUpperCase();
+  const tracked = data.stocks.find(s => s.ticker === ticker);
+
+  if (!tracked) {
+    return res.status(404).json({ error: 'Ticker not tracked', ticker });
+  }
+
+  try {
+    const { rows } = await dbPool.query(
+      `SELECT trade_date, close, volume
+         FROM daily_prices
+        WHERE ticker = $1
+        ORDER BY trade_date ASC`,
+      [ticker]
+    );
+
+    res.json({
+      ticker,
+      currency: ticker === 'SKHY' ? 'KRW' : 'USD',
+      history: rows.map(r => ({
+        date: r.trade_date instanceof Date ? r.trade_date.toISOString().slice(0, 10) : String(r.trade_date).slice(0, 10),
+        close: Number(r.close),
+        volume: Number(r.volume),
+      })),
+    });
+  } catch (error) {
+    console.error(`[ticker/${ticker}/history]`, error);
+    res.status(500).json({ error: 'Failed to load price history' });
+  }
+});
+
+// Aggregates every tracked stock that has a position into one portfolio
+// summary: total value, today's $/% change (both from live quotes, accurate
+// for every ticker), and an approximated 1-year value trend for the
+// dashboard chart.
+app.get('/api/portfolio', async (req, res) => {
+  try {
+    const positioned = data.stocks.filter(s => s.position && s.position.shares && s.position.costPerShare);
+
+    if (positioned.length === 0) {
+      return res.json({
+        holdings: [],
+        totalValue: 0,
+        totalCostBasis: 0,
+        totalGainLossDollar: 0,
+        totalGainLossPercent: null,
+        totalDayChangeDollar: 0,
+        totalDayChangePercent: null,
+        history: [],
+        historyNote: null,
+      });
+    }
+
+    const quotes = await Promise.all(positioned.map(s => getStockQuote(s.ticker)));
+
+    const holdings = positioned.map((stock, i) => {
+      const quote = quotes[i];
+      const price = quote?.c ?? null;
+      const changeToday = quote?.d ?? 0;
+      const { shares, costPerShare } = stock.position;
+
+      const currentValue = price != null ? shares * price : null;
+      const costBasisValue = shares * costPerShare;
+      const gainLossDollar = currentValue != null ? currentValue - costBasisValue : null;
+      const gainLossPercent = currentValue != null && costBasisValue > 0
+        ? (gainLossDollar / costBasisValue) * 100
+        : null;
+      const dayChangeDollar = price != null ? shares * changeToday : null;
+
+      return {
+        ticker: stock.ticker,
+        name: stock.name,
+        shares,
+        costPerShare,
+        currentPrice: price,
+        currentValue,
+        costBasisValue,
+        gainLossDollar,
+        gainLossPercent,
+        dayChangeDollar,
+      };
+    });
+
+    const totalValue = holdings.reduce((sum, h) => sum + (h.currentValue || 0), 0);
+    const totalCostBasis = holdings.reduce((sum, h) => sum + h.costBasisValue, 0);
+    const totalDayChangeDollar = holdings.reduce((sum, h) => sum + (h.dayChangeDollar || 0), 0);
+    const totalGainLossDollar = totalValue - totalCostBasis;
+    const totalGainLossPercent = totalCostBasis > 0 ? (totalGainLossDollar / totalCostBasis) * 100 : null;
+    const yesterdayValue = totalValue - totalDayChangeDollar;
+    const totalDayChangePercent = yesterdayValue > 0 ? (totalDayChangeDollar / yesterdayValue) * 100 : null;
+
+    // Historical trend — approximate using CURRENT share count x historical
+    // close price, not necessarily when the position was actually opened.
+    // SKHY is excluded: its daily_prices come from the KRX listing (Korean
+    // won), a different currency/series than the actual USD OTC price the
+    // position is denominated in — combining them would silently produce a
+    // wrong total, so it's left out rather than guessed at.
+    const skhyHasPosition = positioned.some(s => s.ticker === 'SKHY');
+    const chartable = positioned.filter(s => s.ticker !== 'SKHY');
+
+    let history = [];
+    if (chartable.length > 0) {
+      const tickers = chartable.map(s => s.ticker);
+      const { rows } = await dbPool.query(
+        `SELECT ticker, trade_date, close FROM daily_prices WHERE ticker = ANY($1) ORDER BY trade_date ASC`,
+        [tickers]
+      );
+
+      const byDate = new Map();
+      for (const row of rows) {
+        const dateKey = row.trade_date instanceof Date
+          ? row.trade_date.toISOString().slice(0, 10)
+          : String(row.trade_date).slice(0, 10);
+        const stock = chartable.find(s => s.ticker === row.ticker);
+        const value = stock.position.shares * Number(row.close);
+        byDate.set(dateKey, (byDate.get(dateKey) || 0) + value);
+      }
+
+      history = Array.from(byDate.entries())
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([date, value]) => ({ date, value }));
+    }
+
+    const historyNote = skhyHasPosition
+      ? 'Approximated using your current share count × each day\'s historical close price, not necessarily when you actually bought. SKHY is excluded from this trend — its price history comes from a different listing/currency than your tracked position, so it can\'t be reliably combined here (its current value is still included in the totals above).'
+      : 'Approximated using your current share count × each day\'s historical close price for the period shown, not necessarily when you actually bought.';
+
+    res.json({
+      holdings,
+      totalValue,
+      totalCostBasis,
+      totalGainLossDollar,
+      totalGainLossPercent,
+      totalDayChangeDollar,
+      totalDayChangePercent,
+      history,
+      historyNote,
+    });
+  } catch (error) {
+    console.error('[portfolio]', error);
+    res.status(500).json({ error: 'Failed to build portfolio summary' });
   }
 });
 
